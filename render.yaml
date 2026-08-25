@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: whatsapp-flow-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      # Secrets: Render prompts for these when the Blueprint is created.
+      - key: GREEN_API_INSTANCE_ID
+        sync: false
+      - key: GREEN_API_TOKEN
+        sync: false
+      - key: GREEN_API_API_URL
+        sync: false
+      - key: ADMIN_API_KEY
+        sync: false
+      # Not a secret. On Render Free the filesystem is ephemeral, so this file
+      # is temporary storage. With a paid plan + Persistent Disk mounted at
+      # /var/data, change this to /var/data/users.json - nothing else changes.
+      - key: DATA_FILE_PATH
+        value: data/users.json
