@@ -54,6 +54,8 @@ pytest
 | `GREEN_API_API_URL` | yes | API host, e.g. `https://api.green-api.com` or your instance host `https://7105.api.greenapi.com`. |
 | `ADMIN_API_KEY` | yes | Any long random string. Required by the `/admin/*` endpoints. |
 | `DATA_FILE_PATH` | no | Where customer state is written. `data/users.json` on Render Free. |
+| `GREEN_API_MEDIA_URL` | no | Host that files are uploaded to. Blank derives it from the API URL. |
+| `ASSETS_DIR` | no | Where images the bot sends live. `assets` by default. |
 | `LOG_LEVEL` | no | `INFO` by default. `DEBUG` also logs every webhook body and GREEN-API response. |
 
 Never commit `.env`. A blank value (`GREEN_API_API_URL=`) is treated as "not set" and
@@ -207,6 +209,33 @@ Lists are never scanned, so a menu echoed back to us (`interactiveButtons` /
 mistaken for a choice. Anything the bot still cannot read logs
 `Could not read a choice out of ...` with the complete `messageData` — the one thing
 needed to add support for that shape.
+
+## Sending images
+
+`assets/class_schedule.jpeg` is sent automatically after the answer to any
+schedule button, via GREEN-API's
+[`sendFileByUpload`](https://green-api.com/en/docs/api/sending/SendFileByUpload/).
+The file is uploaded from disk, so nothing depends on the repository being public.
+Note this goes to the **media** host, not the API host — see `GREEN_API_MEDIA_URL` above.
+
+Which button sends which image is data, in `FLOW_ANSWER_IMAGES` in each catalogue:
+
+```python
+FLOW_ANSWER_IMAGES = {
+    "pilates": {"2": "class_schedule.jpeg"},   # מערכת שעות
+    "barre": {"1": "class_schedule.jpeg"},     # מחירים ומערכת שעות
+}
+```
+
+One sheet covers both Pilates and Barre, so all four schedule buttons send it: Hebrew
+Pilates `2`, Hebrew Barre `1`, and English Pilates and Barre `1`. To attach an image to
+another button, drop the file in `assets/` and add a line here. **To replace the
+schedule, overwrite `assets/class_schedule.jpeg`** — the filename is what the code looks up.
+
+The image is sent after the text answer, and a failure to send it is logged rather than
+raised, so a missing file never swallows the answer that already went out. Startup and
+`/admin/diagnostics` both report any configured image that is not on disk, and a test
+asserts every configured file exists.
 
 ## Going back: 0
 

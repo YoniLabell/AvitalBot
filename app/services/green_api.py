@@ -14,6 +14,12 @@ sendInteractiveButtons (https://green-api.com/en/docs/api/sending/SendInteractiv
     Limits: at most 3 buttons, buttonText at most 25 characters.
     GREEN-API marks this method as beta, so callers must handle GreenAPIError.
 
+sendFileByUpload (https://green-api.com/en/docs/api/sending/SendFileByUpload/):
+    POST multipart to the MEDIA host, not the API host:
+        {mediaUrl}/waInstance{idInstance}/sendFileByUpload/{apiTokenInstance}
+    fields chatId, file, fileName and optionally caption
+    response {"idMessage": ..., "urlFile": ...}
+
 The API token is part of the URL path, so everything logged from this module
 goes through _redact() first.
 """
@@ -21,6 +27,8 @@ goes through _redact() first.
 from __future__ import annotations
 
 import logging
+import mimetypes
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -41,22 +49,31 @@ class GreenAPIError(RuntimeError):
     """Raised when GREEN-API could not be reached or rejected the request."""
 
 
+# A token shorter than this is not a real GREEN-API token, and blindly
+# replacing it would shred unrelated words in the log ("Connection" -> "Connec***").
+MIN_REDACTABLE_TOKEN_LENGTH = 8
+
+
 def _redact(text: str) -> str:
     """Replace the API token wherever it appears, so URLs are safe to log."""
     token = settings.green_api_token
-    if token:
+    if token and len(token) >= MIN_REDACTABLE_TOKEN_LENGTH:
         text = text.replace(token, "***TOKEN***")
     return text
 
 
-def _method_url(method: str) -> str:
-    base = settings.green_api_api_url.rstrip("/")
+def _method_url(method: str, media: bool = False) -> str:
+    base = settings.green_api_media_url if media else settings.green_api_api_url
+    base = base.rstrip("/")
     return f"{base}/waInstance{settings.green_api_instance_id}/{method}/{settings.green_api_token}"
 
 
 def _safe_url(method: str) -> str:
     """The endpoint URL with the token masked - safe to log."""
     return _redact(_method_url(method))
+
+
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # GREEN-API's documented file size limit.
 
 
 def _check_configured(method: str) -> None:
@@ -79,20 +96,36 @@ def _check_configured(method: str) -> None:
         raise GreenAPIError(message)
 
 
-async def _request(method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Call one GREEN-API method. POST when there is a payload, else GET."""
+async def _request(
+    method: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    data: dict[str, Any] | None = None,
+    files: dict[str, Any] | None = None,
+    media: bool = False,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Call one GREEN-API method.
+
+    POST with JSON when there is a payload, POST multipart when there are
+    files, GET otherwise. Uploads go to the media host (media=True).
+    """
     _check_configured(method)
 
-    url = _method_url(method)
+    url = _method_url(method, media=media)
     safe_url = _redact(url)
-    verb = "POST" if payload is not None else "GET"
+    verb = "GET" if payload is None and files is None else "POST"
     logger.info("GREEN-API -> %s %s", verb, safe_url)
     if payload is not None:
         logger.debug("GREEN-API request body: %s", payload)
+    if data is not None:
+        logger.debug("GREEN-API form fields: %s", data)
 
     try:
-        async with httpx.AsyncClient(timeout=settings.http_timeout_seconds) as client:
-            if payload is not None:
+        async with httpx.AsyncClient(timeout=timeout or settings.http_timeout_seconds) as client:
+            if files is not None:
+                response = await client.post(url, data=data, files=files)
+            elif payload is not None:
                 response = await client.post(url, json=payload)
             else:
                 response = await client.get(url)
@@ -102,9 +135,10 @@ async def _request(method: str, payload: dict[str, Any] | None = None) -> dict[s
         logger.error("GREEN-API %s could not be reached - %s", method, detail)
         if isinstance(exc, httpx.UnsupportedProtocol):
             logger.error(
-                "GREEN_API_API_URL looks wrong (%r). It must be a full URL, "
-                "for example https://api.green-api.com",
-                settings.green_api_api_url,
+                "%s looks wrong (%r). It must be a full URL, for example %s",
+                "GREEN_API_MEDIA_URL" if media else "GREEN_API_API_URL",
+                settings.green_api_media_url if media else settings.green_api_api_url,
+                "https://media.green-api.com" if media else "https://api.green-api.com",
             )
         elif isinstance(exc, httpx.TimeoutException):
             logger.error(
@@ -215,3 +249,38 @@ async def get_state_instance() -> dict[str, Any]:
 async def get_settings() -> dict[str, Any]:
     """Instance settings, including webhookUrl and the webhook on/off flags."""
     return await _request("getSettings")
+
+
+async def send_file(chat_id: str, file_path: str | Path, caption: str | None = None) -> dict[str, Any]:
+    """Upload a local file and send it. Used for the class schedule image."""
+    path = Path(file_path)
+
+    if not path.is_file():
+        message = f"Cannot send {path} to {chat_id}: the file does not exist"
+        logger.error(message)
+        raise GreenAPIError(message)
+
+    size = path.stat().st_size
+    if size > MAX_UPLOAD_BYTES:
+        raise GreenAPIError(f"{path.name} is {size} bytes, over GREEN-API's 100 MB limit")
+
+    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    logger.info(
+        "Sending file %s (%s, %d bytes) to %s", path.name, content_type, size, chat_id
+    )
+
+    data: dict[str, Any] = {"chatId": chat_id, "fileName": path.name}
+    if caption:
+        data["caption"] = caption
+
+    response = await _request(
+        "sendFileByUpload",
+        data=data,
+        files={"file": (path.name, path.read_bytes(), content_type)},
+        media=True,
+        timeout=settings.upload_timeout_seconds,
+    )
+
+    id_message = _require_id_message("sendFileByUpload", response, chat_id)
+    logger.info("Sent file %s as %s to %s", path.name, id_message, chat_id)
+    return response

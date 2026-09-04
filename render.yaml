@@ -21,6 +21,9 @@ services:
       # /var/data, change this to /var/data/users.json - nothing else changes.
       - key: DATA_FILE_PATH
         value: data/users.json
+      # Images the bot sends, committed to the repository.
+      - key: ASSETS_DIR
+        value: assets
       # Set to DEBUG to log every webhook body and GREEN-API response.
       - key: LOG_LEVEL
         value: INFO

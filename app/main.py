@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 from app.config import settings
 from app.routers import admin, webhook
+from app.services import bot
 from app.storage import json_store
 
 logging.basicConfig(
@@ -27,11 +28,15 @@ def log_configuration() -> None:
     logger.info("  GREEN_API_INSTANCE_ID = %s", settings.green_api_instance_id or "(not set)")
     logger.info("  GREEN_API_TOKEN       = %s", "set" if settings.green_api_token else "(not set)")
     logger.info("  ADMIN_API_KEY         = %s", "set" if settings.admin_api_key else "(not set)")
+    logger.info("  GREEN_API_MEDIA_URL   = %s", settings.green_api_media_url)
     logger.info("  DATA_FILE_PATH        = %s", settings.data_file_path)
+    logger.info("  ASSETS_DIR            = %s", settings.assets_dir)
     logger.info("  LOG_LEVEL             = %s", settings.log_level)
 
     for problem in settings.configuration_problems():
         logger.error("CONFIG PROBLEM: %s", problem)
+    for missing in bot.missing_answer_images():
+        logger.error("CONFIG PROBLEM: image file not found for %s", missing)
 
 
 @asynccontextmanager

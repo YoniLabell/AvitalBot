@@ -27,6 +27,9 @@ class Outbox(list):
     def menus(self) -> list[list[dict]]:
         return [payload for kind, _, payload in self if kind == "buttons"]
 
+    def files(self) -> list[str]:
+        return [str(payload) for kind, _, payload in self if kind == "file"]
+
 
 @pytest.fixture
 def sent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Outbox:
@@ -49,8 +52,15 @@ def sent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Outbox:
         outbox.append(("text", chat_id, body))
         return {"idMessage": f"MOCK{len(outbox)}"}
 
+    async def fake_send_file(chat_id, file_path, caption=None):
+        # A file the bot cannot find would be a real failure in production.
+        assert Path(file_path).is_file(), f"missing asset: {file_path}"
+        outbox.append(("file", chat_id, file_path))
+        return {"idMessage": f"MOCK{len(outbox)}", "urlFile": "https://example.com/f"}
+
     monkeypatch.setattr(green_api, "send_text", fake_send_text)
     monkeypatch.setattr(green_api, "send_buttons", fake_send_buttons)
+    monkeypatch.setattr(green_api, "send_file", fake_send_file)
     return outbox
 
 
@@ -930,3 +940,122 @@ def test_text_fallback_menu_shows_the_return_hint(
         menu_as_text(he.INTEREST_BODY, he.INTEREST_BUTTONS, he.MENU_FOOTER)
     ]
     assert sent.texts()[0].endswith(he.MENU_FOOTER)
+
+
+# --- the class schedule image ----------------------------------------------
+
+
+def test_hebrew_schedule_button_sends_the_image(client: TestClient, sent: Outbox) -> None:
+    reach_flow(client, "1", "1", "S")  # Hebrew, Pilates
+    sent.clear()
+
+    post(client, button_tap("2", "מערכת שעות", "S4"))  # מערכת שעות
+
+    assert sent.files() == [str(Path("assets") / "class_schedule.jpeg")]
+    assert sent.texts() == he.FLOW_ANSWERS["pilates"]["2"]
+
+
+def test_hebrew_barre_schedule_button_sends_the_image(client: TestClient, sent: Outbox) -> None:
+    reach_flow(client, "1", "2", "S2")  # Hebrew, Barre
+    sent.clear()
+
+    post(client, button_tap("1", "מחירים ומערכת שעות", "S24"))
+
+    assert sent.files() == [str(Path("assets") / "class_schedule.jpeg")]
+
+
+def test_english_schedule_buttons_send_the_image(client: TestClient, sent: Outbox) -> None:
+    for interest, prefix in (("1", "S3"), ("2", "S4")):  # Pilates, Barre
+        json_store.reset_user(CHAT_ID)
+        reach_flow(client, "2", interest, prefix)
+        sent.clear()
+        post(client, button_tap("1", "Pricing & class schedule", f"{prefix}9"))
+        assert sent.files() == [str(Path("assets") / "class_schedule.jpeg")]
+
+
+def test_non_schedule_buttons_send_no_image(client: TestClient, sent: Outbox) -> None:
+    reach_flow(client, "1", "3", "S5")  # Hebrew, instructor course
+    sent.clear()
+
+    post(client, button_tap("2", "מועדים ועלויות", "S54"))
+
+    assert sent.files() == []
+
+
+def test_every_configured_image_exists() -> None:
+    """A path typo would only show up as a failed send in production."""
+    from app.services.bot import answer_image_path
+
+    found = 0
+    for messages in (he, en):
+        for flow, by_button in messages.FLOW_ANSWER_IMAGES.items():
+            for button_id in by_button:
+                path = answer_image_path(messages, flow, button_id)
+                assert path is not None and path.is_file(), f"missing asset: {path}"
+                found += 1
+    assert found > 0
+
+
+def test_missing_image_does_not_lose_the_text_answer(
+    client: TestClient, sent: Outbox, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    reach_flow(client, "1", "1", "S6")
+    sent.clear()
+
+    async def failing_send_file(*args, **kwargs):
+        raise green_api.GreenAPIError("file is gone")
+
+    monkeypatch.setattr(green_api, "send_file", failing_send_file)
+
+    with caplog.at_level("ERROR"):
+        post(client, button_tap("2", "מערכת שעות", "S64"))
+
+    assert sent.texts() == he.FLOW_ANSWERS["pilates"]["2"]
+    assert "file is gone" in caplog.text
+
+
+def test_send_file_rejects_a_missing_file() -> None:
+    import asyncio
+
+    with pytest.raises(green_api.GreenAPIError, match="does not exist"):
+        asyncio.run(green_api.send_file("x@c.us", "assets/nope.jpeg"))
+
+
+def test_media_url_is_derived_from_the_api_url() -> None:
+    from app.config import derive_media_url
+
+    assert derive_media_url("https://api.green-api.com") == "https://media.green-api.com"
+    assert derive_media_url("https://7105.api.greenapi.com") == "https://7105.media.greenapi.com"
+
+
+def test_diagnostics_flags_a_missing_image(
+    client: TestClient, sent: Outbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "assets_dir", "no-such-dir")
+
+    async def fake_state():
+        return {"stateInstance": "authorized"}
+
+    async def fake_settings():
+        return {"webhookUrl": "https://b.onrender.com/webhook/green-api",
+                "incomingWebhook": "yes", "outgoingMessageWebhook": "yes",
+                "outgoingAPIMessageWebhook": "yes"}
+
+    monkeypatch.setattr(green_api, "get_state_instance", fake_state)
+    monkeypatch.setattr(green_api, "get_settings", fake_settings)
+
+    body = client.get("/admin/diagnostics", headers={"X-Admin-Key": ADMIN_KEY}).json()
+
+    assert any("not on disk" in problem for problem in body["problems"])
+
+
+def test_a_short_token_does_not_shred_log_messages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replacing a 1-character token everywhere would corrupt every log line."""
+    monkeypatch.setattr(settings, "green_api_token", "t")
+
+    assert green_api._redact("ConnectionError: all attempts failed") == (
+        "ConnectionError: all attempts failed"
+    )
+
+    monkeypatch.setattr(settings, "green_api_token", "a-real-looking-token")
+    assert "***TOKEN***" in green_api._redact("url/a-real-looking-token")

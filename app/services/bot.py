@@ -12,8 +12,10 @@ who types "1" instead of tapping is always understood.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
+from app.config import settings
 from app.messages import catalogue, menu_as_text
 from app.services import green_api
 from app.storage import json_store
@@ -285,7 +287,46 @@ async def _handle_detail_choice(
 
     logger.info("%s chose %s option %s", chat_id, flow, button_id)
     json_store.update_user(chat_id, {"step": STEP_FINISHED})
-    await _send_all(chat_id, messages.FLOW_ANSWERS[flow][button_id])
+    await _send_all(chat_id, messages.FLOW_ANSWERS.get(flow, {}).get(button_id, []))
+    await _send_answer_image(chat_id, messages, flow, button_id)
+
+
+def answer_image_path(messages: Any, flow: str, button_id: str) -> Path | None:
+    """The image configured for one sub-option, if there is one."""
+    file_name = getattr(messages, "FLOW_ANSWER_IMAGES", {}).get(flow, {}).get(button_id)
+    if not file_name:
+        return None
+    return Path(settings.assets_dir) / file_name
+
+
+def missing_answer_images() -> list[str]:
+    """Configured images that are not on disk. Empty means everything is fine."""
+    from app.messages import en, he
+
+    missing = []
+    for messages in (he, en):
+        for flow, by_button in getattr(messages, "FLOW_ANSWER_IMAGES", {}).items():
+            for button_id in by_button:
+                path = answer_image_path(messages, flow, button_id)
+                if path is not None and not path.is_file():
+                    missing.append(f"{flow}/{button_id}: {path}")
+    return missing
+
+
+async def _send_answer_image(chat_id: str, messages: Any, flow: str, button_id: str) -> None:
+    """Send the image attached to a sub-option, if one is configured.
+
+    A missing or rejected image must not swallow the text answer that was
+    already sent, so the failure is logged rather than raised.
+    """
+    path = answer_image_path(messages, flow, button_id)
+    if path is None:
+        return
+
+    try:
+        await green_api.send_file(chat_id, path)
+    except green_api.GreenAPIError as exc:
+        logger.error("Could not send %s to %s: %s", path, chat_id, exc)
 
 
 async def handle_incoming_message(chat_id: str, message_id: str, reply: str) -> None:

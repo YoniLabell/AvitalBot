@@ -104,6 +104,14 @@ FLOW_ANSWERS = {
     },
 }
 
+# Images sent alongside a sub-option's answer, by flow and buttonId. The file
+# name is looked up inside ASSETS_DIR (see app/config.py). One schedule sheet
+# covers both Pilates and Barre, so both schedule buttons send it.
+FLOW_ANSWER_IMAGES = {
+    "pilates": {"2": "class_schedule.jpeg"},          # מערכת שעות
+    "barre": {"1": "class_schedule.jpeg"},            # מחירים ומערכת שעות
+}
+
 # Sub-options that hand the chat to a human instead of sending an answer.
 HANDOVER_BUTTONS = {
     "pilates": set(),

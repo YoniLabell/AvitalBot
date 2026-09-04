@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 
 from app.config import settings
-from app.services import green_api
+from app.services import bot, green_api
 from app.storage import json_store
 
 logger = logging.getLogger(__name__)
@@ -75,11 +75,16 @@ async def diagnostics() -> dict[str, Any]:
             "green_api_instance_id": settings.green_api_instance_id or None,
             "green_api_token_set": bool(settings.green_api_token),
             "admin_api_key_set": bool(settings.admin_api_key),
+            "green_api_media_url": settings.green_api_media_url,
             "data_file_path": settings.data_file_path,
+            "assets_dir": settings.assets_dir,
             "log_level": settings.log_level,
         },
         "storage": _storage_report(),
     }
+
+    for missing in bot.missing_answer_images():
+        problems.append(f"An image the bot sends is not on disk - {missing}")
 
     report["instance_state"] = await _instance_state(problems)
     report["instance_settings"] = await _instance_settings(problems)

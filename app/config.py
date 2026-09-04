@@ -4,6 +4,7 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_API_URL = "https://api.green-api.com"
+DEFAULT_MEDIA_URL = "https://media.green-api.com"
 
 
 class Settings(BaseSettings):
@@ -18,6 +19,10 @@ class Settings(BaseSettings):
     green_api_instance_id: str = ""
     green_api_token: str = ""
     green_api_api_url: str = DEFAULT_API_URL
+    # Files go to the media host, not the API host. Left blank it is derived
+    # from green_api_api_url, so an instance host like
+    # https://7105.api.greenapi.com becomes https://7105.media.greenapi.com.
+    green_api_media_url: str = ""
 
     # Key expected in the X-Admin-Key header on /admin/* endpoints.
     admin_api_key: str = ""
@@ -28,8 +33,13 @@ class Settings(BaseSettings):
     #   DATA_FILE_PATH=/var/data/users.json
     data_file_path: str = "data/users.json"
 
-    # Outgoing HTTP timeout, in seconds.
+    # Where images sent by the bot live, relative to the repository root.
+    assets_dir: str = "assets"
+
+    # Outgoing HTTP timeout, in seconds. Uploads get a longer one: GREEN-API
+    # documents 1-20 seconds for a file, depending on its size.
     http_timeout_seconds: float = 15.0
+    upload_timeout_seconds: float = 60.0
 
     # DEBUG also logs the full body of every webhook and GREEN-API response.
     log_level: str = "INFO"
@@ -40,7 +50,7 @@ class Settings(BaseSettings):
         """Trim env values so a stray space cannot corrupt a URL or a token."""
         return value.strip() if isinstance(value, str) else value
 
-    @field_validator("green_api_api_url")
+    @field_validator("green_api_api_url", "green_api_media_url")
     @classmethod
     def _normalize_api_url(cls, value: str) -> str:
         # A blank value means "not set"; _build_settings applies the default.
@@ -68,11 +78,23 @@ class Settings(BaseSettings):
         return problems
 
 
+def derive_media_url(api_url: str) -> str:
+    """The media host that goes with an API host."""
+    for api_part, media_part in ((".api.", ".media."), ("//api.", "//media.")):
+        if api_part in api_url:
+            return api_url.replace(api_part, media_part, 1)
+    return DEFAULT_MEDIA_URL
+
+
 def _build_settings() -> Settings:
     """Blank values fall back to the field defaults rather than to ''."""
     settings = Settings()
     if not settings.green_api_api_url:
         settings.green_api_api_url = DEFAULT_API_URL
+    if not settings.green_api_media_url:
+        settings.green_api_media_url = derive_media_url(settings.green_api_api_url)
+    if not settings.assets_dir:
+        settings.assets_dir = "assets"
     if not settings.data_file_path:
         settings.data_file_path = "data/users.json"
     if not settings.log_level:
