@@ -26,6 +26,9 @@ INTEREST_BUTTONS = [
     {"type": "reply", "buttonId": "3", "buttonText": "Instructor Course"},
 ]
 
+# Shown under the interest and flow menus, so customers know 0 takes them back.
+MENU_FOOTER = "0 to return to the main menu"
+
 INVALID_INTEREST_CHOICE = "Sorry, I didn't get that 🙈"
 
 

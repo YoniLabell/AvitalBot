@@ -14,7 +14,8 @@ What it does:
    three follow-up buttons (pricing, trial class, talk to us …).
 4. The customer picks a follow-up → the bot sends the answer, or hands the chat to a human
    if they asked to talk to someone.
-5. The moment the business owner replies manually from WhatsApp, the bot goes silent for that chat.
+5. Typing **0** at any point goes back to the main menu.
+6. The moment the business owner replies manually from WhatsApp, the bot goes silent for that chat.
 
 ---
 
@@ -207,6 +208,20 @@ mistaken for a choice. Anything the bot still cannot read logs
 `Could not read a choice out of ...` with the complete `messageData` — the one thing
 needed to add support for that shape.
 
+## Going back: 0
+
+Typing `0` at any step returns the customer to the main (interest) menu, clearing the
+flow they were in. It works before they have finished — and after, when the bot would
+otherwise stay quiet. Before a language has been picked there is no main menu yet, so
+`0` re-asks the language question instead.
+
+`0` is not a button: GREEN-API allows only three per message and all three are in use.
+It is advertised in each menu's footer (`MENU_FOOTER` in the catalogues) and is matched
+whether typed or arriving as a tapped button id.
+
+One deliberate exception: `0` does **not** wake the bot in a chat a human has taken
+over. Only `POST /admin/resume/{chat_id}` does that.
+
 ## Editing the wording
 
 All customer-facing text lives in `app/messages/he.py` and `app/messages/en.py`:
@@ -220,6 +235,7 @@ All customer-facing text lives in `app/messages/he.py` and `app/messages/en.py`:
 | `FLOW_ANSWERS[flow][buttonId]` | What the bot answers for a follow-up — a list of 1–3 messages. |
 | `HANDOVER_BUTTONS[flow]` | Follow-up buttons that fetch a human instead of answering. |
 | `HANDOVER_MESSAGE` | Sent just before a human takes over. |
+| `MENU_FOOTER` | The "0 goes back" hint under the interest and flow menus. |
 
 Everything still marked `[TODO: ...]` needs the real wording — those are the answers
 behind each follow-up button, and the handover message.

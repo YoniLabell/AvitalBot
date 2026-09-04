@@ -14,7 +14,9 @@ def catalogue(language: str | None):
     return _CATALOGUES.get(language or "", _CATALOGUES[DEFAULT_LANGUAGE])
 
 
-def menu_as_text(body: str, buttons: list[dict[str, Any]]) -> str:
+def menu_as_text(
+    body: str, buttons: list[dict[str, Any]], footer: str | None = None
+) -> str:
     """Render a button menu as a numbered plain-text message.
 
     Used when GREEN-API cannot deliver interactive buttons, so the wording only
@@ -22,4 +24,6 @@ def menu_as_text(body: str, buttons: list[dict[str, Any]]) -> str:
     """
     lines = [body, ""]
     lines += [f"{button['buttonId']}. {button['buttonText']}" for button in buttons]
+    if footer:
+        lines += ["", footer]
     return "\n".join(lines)

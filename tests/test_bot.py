@@ -825,3 +825,108 @@ def test_real_interactive_buttons_response_drives_the_whole_flow(
     assert user["flow"] == "instructor_course"
     assert user["step"] == 4
     assert sent.texts() == he.FLOW_ANSWERS["instructor_course"]["2"]
+
+
+# --- "0" returns to the main menu ------------------------------------------
+
+
+def test_zero_returns_from_a_flow_menu(client: TestClient, sent: Outbox) -> None:
+    reach_flow(client, "1", "2", "Z")
+    assert json_store.get_user(CHAT_ID)["flow"] == "barre"
+    sent.clear()
+
+    post(client, incoming("0", "Z4"))
+
+    user = json_store.get_user(CHAT_ID)
+    assert user["step"] == 2
+    assert user["flow"] is None
+    assert user["language"] == "he"
+    assert sent.menus() == [he.INTEREST_BUTTONS]
+
+
+def test_zero_returns_after_the_flow_is_finished(client: TestClient, sent: Outbox) -> None:
+    reach_flow(client, "2", "1", "Y")
+    post(client, button_tap("1", "Pricing & class schedule", "Y4"))
+    assert json_store.get_user(CHAT_ID)["step"] == 4
+    sent.clear()
+
+    post(client, incoming("0", "Y5"))
+
+    assert json_store.get_user(CHAT_ID)["step"] == 2
+    assert sent.menus() == [en.INTEREST_BUTTONS]
+
+
+def test_zero_on_the_interest_menu_resends_it(client: TestClient, sent: Outbox) -> None:
+    post(client, incoming("hi", "X1"))
+    post(client, button_tap("1", "עברית", "X2"))
+    sent.clear()
+
+    post(client, incoming("0", "X3"))
+
+    assert sent.menus() == [he.INTEREST_BUTTONS]
+    assert json_store.get_user(CHAT_ID)["step"] == 2
+
+
+def test_zero_before_a_language_is_chosen_repeats_the_language_menu(
+    client: TestClient, sent: Outbox
+) -> None:
+    post(client, incoming("hi", "W1"))
+    sent.clear()
+
+    post(client, incoming("0", "W2"))
+
+    assert sent.menus() == [he.LANGUAGE_BUTTONS]
+    assert json_store.get_user(CHAT_ID)["step"] == 1
+
+
+def test_zero_works_as_a_tapped_button_too(client: TestClient, sent: Outbox) -> None:
+    reach_flow(client, "1", "3", "V")
+    sent.clear()
+
+    post(client, button_tap("0", "", "V4"))
+
+    assert sent.menus() == [he.INTEREST_BUTTONS]
+    assert json_store.get_user(CHAT_ID)["step"] == 2
+
+
+def test_zero_does_not_revive_a_chat_a_human_took_over(client: TestClient, sent: Outbox) -> None:
+    """A stray 0 must never pull the bot back into a conversation a person is having."""
+    reach_flow(client, "2", "2", "U")
+    post(client, outgoing("outgoingMessageReceived"))
+    assert json_store.get_user(CHAT_ID)["bot_enabled"] is False
+    sent.clear()
+
+    post(client, incoming("0", "U5"))
+
+    assert sent == []
+    assert json_store.get_user(CHAT_ID)["bot_enabled"] is False
+
+
+def test_menus_carry_the_return_hint(client: TestClient, sent: Outbox) -> None:
+    post(client, incoming("hi", "H1"))
+    # The language menu has nowhere to go back to, so it has no hint.
+    assert he.MENU_FOOTER not in sent.texts()
+
+    post(client, button_tap("2", "English", "H2"))
+    post(client, button_tap("2", "Barre", "H3"))
+
+    assert en.MENU_FOOTER == "0 to return to the main menu"
+
+
+def test_text_fallback_menu_shows_the_return_hint(
+    client: TestClient, sent: Outbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    post(client, incoming("hi", "G1"))
+
+    async def failing_send_buttons(*args, **kwargs):
+        raise green_api.GreenAPIError("buttons unavailable")
+
+    monkeypatch.setattr(green_api, "send_buttons", failing_send_buttons)
+    sent.clear()
+
+    post(client, incoming("1", "G2"))
+
+    assert sent.texts() == [
+        menu_as_text(he.INTEREST_BODY, he.INTEREST_BUTTONS, he.MENU_FOOTER)
+    ]
+    assert sent.texts()[0].endswith(he.MENU_FOOTER)

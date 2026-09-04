@@ -31,6 +31,10 @@ STEP_FINISHED = 4
 LANGUAGE_BY_BUTTON_ID = {"1": "he", "2": "en"}
 FLOW_BY_BUTTON_ID = {"1": "pilates", "2": "barre", "3": "instructor_course"}
 
+# Typing this at any point goes back to the main (interest) menu. It cannot be
+# a button: GREEN-API allows only 3 per message and all 3 are already used.
+RETURN_TO_MENU_INPUT = "0"
+
 # Extra text a customer might type instead of tapping a language button.
 LANGUAGE_ALIASES = {"עברית": "he", "hebrew": "he", "english": "en", "אנגלית": "en"}
 
@@ -163,17 +167,53 @@ def _match_button_id(reply: str, buttons: list[dict[str, Any]]) -> str | None:
     return _match_choice(reply, buttons, identity)
 
 
-async def _send_menu(chat_id: str, body: str, buttons: list[dict[str, Any]]) -> None:
+async def _send_menu(
+    chat_id: str,
+    body: str,
+    buttons: list[dict[str, Any]],
+    footer: str | None = None,
+) -> None:
     """Send a menu as interactive buttons, falling back to numbered text."""
     try:
-        await green_api.send_buttons(chat_id, body, buttons)
+        await green_api.send_buttons(chat_id, body, buttons, footer=footer)
     except green_api.GreenAPIError as exc:
         logger.warning(
             "Button menu failed for %s (%s) - falling back to the numbered text menu",
             chat_id,
             exc,
         )
-        await green_api.send_text(chat_id, menu_as_text(body, buttons))
+        await green_api.send_text(chat_id, menu_as_text(body, buttons, footer))
+
+
+async def _send_interest_menu(chat_id: str, language: str | None) -> None:
+    messages = catalogue(language)
+    await _send_menu(
+        chat_id, messages.INTEREST_BODY, messages.INTEREST_BUTTONS, messages.MENU_FOOTER
+    )
+
+
+async def _send_flow_menu(chat_id: str, language: str | None, flow: str) -> None:
+    messages = catalogue(language)
+    await _send_menu(
+        chat_id, messages.FLOW_BODY[flow], messages.FLOW_BUTTONS[flow], messages.MENU_FOOTER
+    )
+
+
+async def return_to_main_menu(chat_id: str, user: dict[str, Any]) -> None:
+    """Send the customer back to the main menu, whatever step they were on.
+
+    Before a language is picked there is no main menu yet, so the language
+    question is asked again instead.
+    """
+    language = user.get("language")
+    if language is None:
+        logger.info("%s asked to go back before choosing a language", chat_id)
+        await _start_onboarding(chat_id)
+        return
+
+    logger.info("%s asked to go back to the main menu", chat_id)
+    json_store.update_user(chat_id, {"flow": None, "step": STEP_AWAITING_INTEREST})
+    await _send_interest_menu(chat_id, language)
 
 
 async def _send_all(chat_id: str, messages: list[str]) -> None:
@@ -203,8 +243,7 @@ async def _handle_language_choice(chat_id: str, reply: str) -> None:
 
     logger.info("%s chose language %s", chat_id, language)
     json_store.update_user(chat_id, {"language": language, "step": STEP_AWAITING_INTEREST})
-    chosen = catalogue(language)
-    await _send_menu(chat_id, chosen.INTEREST_BODY, chosen.INTEREST_BUTTONS)
+    await _send_interest_menu(chat_id, language)
 
 
 async def _handle_interest_choice(chat_id: str, language: str | None, reply: str) -> None:
@@ -213,12 +252,12 @@ async def _handle_interest_choice(chat_id: str, language: str | None, reply: str
     if flow is None:
         logger.info("Unrecognised interest choice from %s: %r - repeating menu", chat_id, reply)
         await green_api.send_text(chat_id, messages.INVALID_INTEREST_CHOICE)
-        await _send_menu(chat_id, messages.INTEREST_BODY, messages.INTEREST_BUTTONS)
+        await _send_interest_menu(chat_id, language)
         return
 
     logger.info("%s chose flow %s", chat_id, flow)
     json_store.update_user(chat_id, {"flow": flow, "step": STEP_AWAITING_DETAIL})
-    await _send_menu(chat_id, messages.FLOW_BODY[flow], messages.FLOW_BUTTONS[flow])
+    await _send_flow_menu(chat_id, language, flow)
 
 
 async def _handle_detail_choice(
@@ -235,7 +274,7 @@ async def _handle_detail_choice(
     if button_id is None:
         logger.info("Unrecognised %s choice from %s: %r - repeating menu", flow, chat_id, reply)
         await green_api.send_text(chat_id, messages.INVALID_INTEREST_CHOICE)
-        await _send_menu(chat_id, messages.FLOW_BODY[flow], buttons)
+        await _send_flow_menu(chat_id, language, flow)
         return
 
     if button_id in messages.HANDOVER_BUTTONS.get(flow, set()):
@@ -293,7 +332,9 @@ async def handle_incoming_message(chat_id: str, message_id: str, reply: str) -> 
         user.get("flow"),
     )
 
-    if step == STEP_NEW:
+    if _normalize(reply) == RETURN_TO_MENU_INPUT:
+        await return_to_main_menu(chat_id, user)
+    elif step == STEP_NEW:
         await _start_onboarding(chat_id)
     elif step == STEP_AWAITING_LANGUAGE:
         await _handle_language_choice(chat_id, reply)

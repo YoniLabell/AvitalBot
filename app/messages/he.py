@@ -26,6 +26,9 @@ INTEREST_BUTTONS = [
     {"type": "reply", "buttonId": "3", "buttonText": "קורס הכשרת מדריכות"},
 ]
 
+# Shown under the interest and flow menus, so customers know 0 takes them back.
+MENU_FOOTER = "0 לחזרה לתפריט הראשי"
+
 INVALID_INTEREST_CHOICE = "לא הבנתי 🙈"
 
 
