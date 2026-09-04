@@ -86,16 +86,37 @@ FLOW_BUTTONS = {
     ],
 }
 
+# The price list, in one place: both Pilates and Barre point at it, so a price
+# only ever has to be changed here.
+PRICING = (
+    "מחירון 🤍\n"
+    "\n"
+    "שיעור היכרות — 70 ₪\n"
+    "שיעור בודד — 90 ₪\n"
+    "\n"
+    "כרטיסייה\n"
+    "10 שיעורים — 860 ₪\n"
+    "תוקף לשנה\n"
+    "\n"
+    "מנויים חודשיים\n"
+    "5 שיעורים — 350 ₪\n"
+    "9 שיעורים — 610 ₪\n"
+    "12 שיעורים לסטודנטים — 770 ₪\n"
+    "חופשי חודשי — 999 ₪"
+)
+
 # What the bot answers for each sub-option, as a list of 1-3 messages.
 # TODO: replace every placeholder below with the real wording.
 FLOW_ANSWERS = {
     "pilates": {
-        "1": ["[TODO: מחירים ומנויים - פילאטיס מכשירים]"],
-        "2": ["[TODO: מערכת שעות - פילאטיס מכשירים]"],
+        "1": [PRICING],
+        # מערכת שעות: the schedule image below says it all, so no text.
+        "2": [],
         "3": ["[TODO: קביעת שיעור ניסיון - פילאטיס מכשירים]"],
     },
     "barre": {
-        "1": ["[TODO: מחירים ומערכת שעות - Barre]"],
+        # מחירים ומערכת שעות: the price list, then the schedule image below.
+        "1": [PRICING],
         "2": ["[TODO: קביעת שיעור ניסיון - Barre]"],
     },
     "instructor_course": {

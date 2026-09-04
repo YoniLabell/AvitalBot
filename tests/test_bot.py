@@ -625,7 +625,11 @@ def test_every_flow_button_leads_somewhere(client: TestClient, sent: Outbox) -> 
             for button in buttons:
                 assert len(button["buttonText"]) <= green_api.MAX_BUTTON_TEXT_LENGTH, button
             ids = {button["buttonId"] for button in buttons}
-            handled = set(messages.FLOW_ANSWERS.get(flow, {})) | messages.HANDOVER_BUTTONS[flow]
+            handled = (
+                {bid for bid, texts in messages.FLOW_ANSWERS.get(flow, {}).items() if texts}
+                | set(messages.FLOW_ANSWER_IMAGES.get(flow, {}))
+                | messages.HANDOVER_BUTTONS[flow]
+            )
             assert ids == handled, (flow, ids, handled)
 
 
@@ -1059,3 +1063,82 @@ def test_a_short_token_does_not_shred_log_messages(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(settings, "green_api_token", "a-real-looking-token")
     assert "***TOKEN***" in green_api._redact("url/a-real-looking-token")
+
+
+# --- the price list --------------------------------------------------------
+
+
+def test_hebrew_pricing_button_sends_the_price_list(client: TestClient, sent: Outbox) -> None:
+    reach_flow(client, "1", "1", "P")  # Hebrew, Pilates
+    sent.clear()
+
+    post(client, button_tap("1", "מחירים ומנויים", "P4"))
+
+    assert sent.texts() == [he.PRICING]
+    assert sent.files() == []  # this button is prices only, no schedule
+    assert "שיעור היכרות — 70 ₪" in sent.texts()[0]
+    assert "חופשי חודשי — 999 ₪" in sent.texts()[0]
+
+
+def test_english_pricing_button_sends_prices_then_the_schedule(
+    client: TestClient, sent: Outbox
+) -> None:
+    reach_flow(client, "2", "1", "P2")  # English, Pilates
+    sent.clear()
+
+    post(client, button_tap("1", "Pricing & class schedule", "P24"))
+
+    assert sent.texts() == [en.PRICING]
+    assert sent.files() == [str(Path("assets") / "class_schedule.jpeg")]
+    # The prices come before the schedule image.
+    assert [kind for kind, _, _ in sent] == ["text", "file"]
+    assert "Intro Class — ₪70" in sent.texts()[0]
+
+
+def test_hebrew_barre_pricing_button_sends_prices_then_the_schedule(
+    client: TestClient, sent: Outbox
+) -> None:
+    reach_flow(client, "1", "2", "P3")  # Hebrew, Barre
+    sent.clear()
+
+    post(client, button_tap("1", "מחירים ומערכת שעות", "P34"))
+
+    assert sent.texts() == [he.PRICING]
+    assert sent.files() == [str(Path("assets") / "class_schedule.jpeg")]
+
+
+def test_schedule_only_button_sends_the_image_and_no_text(
+    client: TestClient, sent: Outbox
+) -> None:
+    reach_flow(client, "1", "1", "P4")  # Hebrew, Pilates
+    sent.clear()
+
+    post(client, button_tap("2", "מערכת שעות", "P44"))
+
+    assert sent.texts() == []
+    assert sent.files() == [str(Path("assets") / "class_schedule.jpeg")]
+
+
+def test_prices_are_defined_once_per_language(sent: Outbox) -> None:
+    """Both flows must point at the same PRICING string, so changing a price
+    is a single edit rather than four."""
+    for messages in (he, en):
+        assert messages.FLOW_ANSWERS["pilates"]["1"][0] is messages.PRICING
+        assert messages.FLOW_ANSWERS["barre"]["1"][0] is messages.PRICING
+
+
+def test_prices_agree_between_the_two_languages(sent: Outbox) -> None:
+    """The same numbers must appear in both price lists."""
+    amounts = ("70", "90", "860", "350", "610", "770", "999")
+    for amount in amounts:
+        assert amount in he.PRICING, amount
+        assert amount in en.PRICING, amount
+    assert he.PRICING.count("₪") == en.PRICING.count("₪")
+
+
+def test_the_course_flow_keeps_its_own_pricing(sent: Outbox) -> None:
+    """The class price list must not leak into the instructor course, which
+    has its own dates and costs."""
+    for messages in (he, en):
+        for answer in messages.FLOW_ANSWERS["instructor_course"].values():
+            assert messages.PRICING not in answer

@@ -92,15 +92,35 @@ FLOW_BUTTONS = {
     ],
 }
 
+# The price list, in one place: both Pilates and Barre point at it, so a price
+# only ever has to be changed here.
+PRICING = (
+    "Pricing\n"
+    "\n"
+    "Intro Class — ₪70\n"
+    "Single Class — ₪90\n"
+    "\n"
+    "Class Package\n"
+    "10 Classes — ₪860\n"
+    "Valid for one year\n"
+    "\n"
+    "Monthly Memberships\n"
+    "5 Classes — ₪350\n"
+    "9 Classes — ₪610\n"
+    "Student Membership | 12 Classes — ₪770\n"
+    "Unlimited Monthly Membership — ₪999"
+)
+
 # What the bot answers for each sub-option, as a list of 1-3 messages.
 # TODO: replace every placeholder below with the real wording.
 FLOW_ANSWERS = {
     "pilates": {
-        "1": ["[TODO: Pricing & class schedule - Pilates Equipment]"],
+        # Pricing & class schedule: the price list, then the schedule image below.
+        "1": [PRICING],
         "2": ["[TODO: Booking a trial class - Pilates Equipment]"],
     },
     "barre": {
-        "1": ["[TODO: Pricing & class schedule - Barre]"],
+        "1": [PRICING],
         "2": ["[TODO: Booking a trial class - Barre]"],
     },
     "instructor_course": {

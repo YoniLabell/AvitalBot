@@ -261,7 +261,8 @@ All customer-facing text lives in `app/messages/he.py` and `app/messages/en.py`:
 | `INTEREST_BODY` / `INTEREST_BUTTONS` | The three interest buttons. |
 | `FLOW_BODY[flow]` | The description sent when that interest is chosen. |
 | `FLOW_BUTTONS[flow]` | That flow's own follow-up buttons. |
-| `FLOW_ANSWERS[flow][buttonId]` | What the bot answers for a follow-up — a list of 1–3 messages. |
+| `PRICING` | The class price list. Both Pilates and Barre point at it, so a price is one edit. |
+| `FLOW_ANSWERS[flow][buttonId]` | What the bot answers for a follow-up — a list of 1–3 messages. An empty list means the image alone is the answer. |
 | `HANDOVER_BUTTONS[flow]` | Follow-up buttons that fetch a human instead of answering. |
 | `HANDOVER_MESSAGE` | Sent just before a human takes over. |
 | `MENU_FOOTER` | The "0 goes back" hint under the interest and flow menus. |
