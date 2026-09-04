@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.main import app
-from app.messages import en, he
+from app.messages import en, he, menu_as_text
 from app.services import green_api
 from app.storage import json_store
 
@@ -18,32 +18,87 @@ CHAT_ID = "972501234567@c.us"
 ADMIN_KEY = "test-admin-key"
 
 
+class Outbox(list):
+    """Records what the bot sent: ("text"|"buttons", chat_id, payload)."""
+
+    def texts(self) -> list[str]:
+        return [payload for kind, _, payload in self if kind == "text"]
+
+    def menus(self) -> list[list[dict]]:
+        return [payload for kind, _, payload in self if kind == "buttons"]
+
+
 @pytest.fixture
-def sent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
-    """Point storage at a temp file and capture outgoing GREEN-API messages."""
+def sent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Outbox:
+    """Point storage at a temp file and capture outgoing GREEN-API calls."""
     monkeypatch.setattr(settings, "data_file_path", str(tmp_path / "data" / "users.json"))
     monkeypatch.setattr(settings, "admin_api_key", ADMIN_KEY)
 
-    outbox: list[tuple[str, str]] = []
+    outbox = Outbox()
 
     async def fake_send_text(chat_id: str, message: str) -> dict[str, str]:
-        outbox.append((chat_id, message))
+        outbox.append(("text", chat_id, message))
+        return {"idMessage": f"MOCK{len(outbox)}"}
+
+    async def fake_send_buttons(chat_id, body, buttons, header=None, footer=None):
+        # Enforce the documented GREEN-API limits in tests too.
+        assert 1 <= len(buttons) <= green_api.MAX_BUTTONS
+        for button in buttons:
+            assert len(button["buttonText"]) <= green_api.MAX_BUTTON_TEXT_LENGTH
+        outbox.append(("buttons", chat_id, buttons))
+        outbox.append(("text", chat_id, body))
         return {"idMessage": f"MOCK{len(outbox)}"}
 
     monkeypatch.setattr(green_api, "send_text", fake_send_text)
+    monkeypatch.setattr(green_api, "send_buttons", fake_send_buttons)
     return outbox
 
 
 @pytest.fixture
-def client(sent: list[tuple[str, str]]) -> TestClient:
+def client(sent: Outbox) -> TestClient:
     with TestClient(app) as test_client:
         yield test_client
 
 
 def incoming(text: str, message_id: str = "MSG1", chat_id: str = CHAT_ID) -> dict:
     """A GREEN-API incomingMessageReceived text notification."""
+    return _notification(
+        "incomingMessageReceived",
+        message_id,
+        chat_id,
+        {"typeMessage": "textMessage", "textMessageData": {"textMessage": text}},
+    )
+
+
+def button_tap(button_id: str, button_text: str, message_id: str = "MSG1", chat_id: str = CHAT_ID) -> dict:
+    """A GREEN-API interactiveButtonsReply notification (a tapped button)."""
+    return _notification(
+        "incomingMessageReceived",
+        message_id,
+        chat_id,
+        {
+            "typeMessage": "interactiveButtonsReply",
+            "interactiveButtonsReply": {
+                "contentText": "menu body",
+                "buttons": [{"type": "reply", "buttonId": button_id, "buttonText": button_text}],
+            },
+        },
+    )
+
+
+def outgoing(type_webhook: str, chat_id: str = CHAT_ID) -> dict:
+    """A GREEN-API outgoing notification (manual from phone, or via our API)."""
+    return _notification(
+        type_webhook,
+        "OUT1",
+        chat_id,
+        {"typeMessage": "textMessage", "textMessageData": {"textMessage": "Hi, this is the studio"}},
+    )
+
+
+def _notification(type_webhook: str, message_id: str, chat_id: str, message_data: dict) -> dict:
     return {
-        "typeWebhook": "incomingMessageReceived",
+        "typeWebhook": type_webhook,
         "instanceData": {"idInstance": 1101234567, "wid": "972500000000@c.us", "typeInstance": "whatsapp"},
         "timestamp": 1588091580,
         "idMessage": message_id,
@@ -53,25 +108,7 @@ def incoming(text: str, message_id: str = "MSG1", chat_id: str = CHAT_ID) -> dic
             "chatName": "Customer",
             "senderName": "Customer",
         },
-        "messageData": {
-            "typeMessage": "textMessage",
-            "textMessageData": {"textMessage": text},
-        },
-    }
-
-
-def outgoing(type_webhook: str, chat_id: str = CHAT_ID) -> dict:
-    """A GREEN-API outgoing notification (manual from phone, or via our API)."""
-    return {
-        "typeWebhook": type_webhook,
-        "instanceData": {"idInstance": 1101234567, "wid": "972500000000@c.us", "typeInstance": "whatsapp"},
-        "timestamp": 1588091580,
-        "idMessage": "OUT1",
-        "senderData": {"chatId": chat_id, "sender": "972500000000@c.us", "senderName": "Studio"},
-        "messageData": {
-            "typeMessage": "textMessage",
-            "textMessageData": {"textMessage": "Hi, this is the studio"},
-        },
+        "messageData": message_data,
     }
 
 
@@ -81,14 +118,14 @@ def post(client: TestClient, payload: dict):
     return response
 
 
-def test_health_is_cheap_and_ok(client: TestClient, sent: list) -> None:
+def test_health_is_cheap_and_ok(client: TestClient, sent: Outbox) -> None:
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
     assert sent == []
 
 
-def test_first_message_starts_onboarding(client: TestClient, sent: list) -> None:
+def test_first_message_starts_onboarding(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("שלום"))
 
     user = json_store.get_user(CHAT_ID)
@@ -98,63 +135,97 @@ def test_first_message_starts_onboarding(client: TestClient, sent: list) -> None
     assert user["bot_enabled"] is True
 
 
-def test_language_menu_is_sent(client: TestClient, sent: list) -> None:
+def test_language_menu_is_sent_as_two_buttons(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi"))
 
-    assert sent == [(CHAT_ID, he.LANGUAGE_MENU)]
-    assert "1. עברית 🇮🇱" in sent[0][1]
-    assert "2. English 🇬🇧" in sent[0][1]
+    assert sent.menus() == [he.LANGUAGE_BUTTONS]
+    assert sent.texts() == [he.LANGUAGE_BODY]
+    assert [button["buttonText"] for button in sent.menus()[0]] == ["עברית 🇮🇱", "English 🇬🇧"]
 
 
-def test_hebrew_selection(client: TestClient, sent: list) -> None:
+def test_interest_menu_has_exactly_three_buttons(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi", "M1"))
-    post(client, incoming("1", "M2"))
+    post(client, incoming("2", "M2"))
+
+    assert json_store.get_user(CHAT_ID)["step"] == 2
+    assert [button["buttonText"] for button in sent.menus()[-1]] == [
+        "Reformer Pilates",
+        "Barre",
+        "Instructor Course",
+    ]
+
+
+def test_hebrew_selection(client: TestClient, sent: Outbox) -> None:
+    post(client, incoming("hi", "M1"))
+    post(client, button_tap("1", "עברית 🇮🇱", "M2"))
 
     assert json_store.get_user(CHAT_ID)["language"] == "he"
-    assert sent[-1] == (CHAT_ID, he.INTEREST_MENU)
+    assert sent.menus()[-1] == he.INTEREST_BUTTONS
 
 
-def test_english_selection(client: TestClient, sent: list) -> None:
+def test_english_selection(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi", "M1"))
-    post(client, incoming("2", "M2"))
+    post(client, button_tap("2", "English 🇬🇧", "M2"))
 
     assert json_store.get_user(CHAT_ID)["language"] == "en"
-    assert sent[-1] == (CHAT_ID, en.INTEREST_MENU)
+    assert sent.menus()[-1] == en.INTEREST_BUTTONS
 
 
-def test_interest_menu_lists_four_options(client: TestClient, sent: list) -> None:
+def test_pilates_button_changes_flow(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi", "M1"))
-    post(client, incoming("2", "M2"))
-
-    menu = sent[-1][1]
-    assert json_store.get_user(CHAT_ID)["step"] == 2
-    for option in ("1. Reformer Pilates", "2. Barre", "3. Instructor Training Course", "4. Something else"):
-        assert option in menu
-
-
-def test_pilates_selection_changes_flow(client: TestClient, sent: list) -> None:
-    post(client, incoming("hi", "M1"))
-    post(client, incoming("1", "M2"))
-    post(client, incoming("1", "M3"))
+    post(client, button_tap("1", "עברית 🇮🇱", "M2"))
+    post(client, button_tap("1", "Pilates מכשירים", "M3"))
 
     user = json_store.get_user(CHAT_ID)
     assert user["flow"] == "pilates"
     assert user["step"] == 3
-    assert sent[-len(he.FLOW_MESSAGES["pilates"]):] == [
-        (CHAT_ID, message) for message in he.FLOW_MESSAGES["pilates"]
-    ]
+    assert sent.texts()[-len(he.FLOW_MESSAGES["pilates"]):] == he.FLOW_MESSAGES["pilates"]
 
 
-def test_all_interest_options_map_to_flows(client: TestClient, sent: list) -> None:
-    for choice, flow in (("1", "pilates"), ("2", "barre"), ("3", "instructor_course"), ("4", "other")):
-        chat_id = f"9725000000{choice}@c.us"
-        post(client, incoming("hi", f"A{choice}", chat_id))
-        post(client, incoming("2", f"B{choice}", chat_id))
-        post(client, incoming(choice, f"C{choice}", chat_id))
+def test_all_three_buttons_map_to_flows(client: TestClient, sent: Outbox) -> None:
+    for button_id, flow in (("1", "pilates"), ("2", "barre"), ("3", "instructor_course")):
+        chat_id = f"9725000000{button_id}@c.us"
+        post(client, incoming("hi", f"A{button_id}", chat_id))
+        post(client, button_tap("2", "English 🇬🇧", f"B{button_id}", chat_id))
+        label = en.INTEREST_BUTTONS[int(button_id) - 1]["buttonText"]
+        post(client, button_tap(button_id, label, f"C{button_id}", chat_id))
         assert json_store.get_user(chat_id)["flow"] == flow
 
 
-def test_disabled_customer_gets_no_reply(client: TestClient, sent: list) -> None:
+def test_typed_number_still_works_when_buttons_do_not_render(client: TestClient, sent: Outbox) -> None:
+    post(client, incoming("hi", "M1"))
+    post(client, incoming("1", "M2"))
+    post(client, incoming("3", "M3"))
+
+    assert json_store.get_user(CHAT_ID)["flow"] == "instructor_course"
+
+
+def test_typed_button_label_is_understood(client: TestClient, sent: Outbox) -> None:
+    post(client, incoming("hi", "M1"))
+    post(client, incoming("English", "M2"))
+    post(client, incoming("barre", "M3"))
+
+    user = json_store.get_user(CHAT_ID)
+    assert user["language"] == "en"
+    assert user["flow"] == "barre"
+
+
+def test_menu_falls_back_to_text_when_buttons_fail(
+    client: TestClient, sent: Outbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def failing_send_buttons(*args, **kwargs):
+        raise green_api.GreenAPIError("buttons unavailable")
+
+    monkeypatch.setattr(green_api, "send_buttons", failing_send_buttons)
+
+    post(client, incoming("hi"))
+
+    assert sent.menus() == []
+    assert sent.texts() == [menu_as_text(he.LANGUAGE_BODY, he.LANGUAGE_BUTTONS)]
+    assert "1. עברית 🇮🇱" in sent.texts()[0]
+
+
+def test_disabled_customer_gets_no_reply(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi", "M1"))
     json_store.pause_user(CHAT_ID)
     sent.clear()
@@ -164,14 +235,14 @@ def test_disabled_customer_gets_no_reply(client: TestClient, sent: list) -> None
     assert sent == []
 
 
-def test_duplicate_message_is_not_answered_twice(client: TestClient, sent: list) -> None:
+def test_duplicate_message_is_not_answered_twice(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi", "SAME"))
     post(client, incoming("hi", "SAME"))
 
-    assert len(sent) == 1
+    assert sent.menus() == [he.LANGUAGE_BUTTONS]
 
 
-def test_outgoing_manual_message_disables_bot(client: TestClient, sent: list) -> None:
+def test_outgoing_manual_message_disables_bot(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi", "M1"))
     sent.clear()
 
@@ -185,7 +256,7 @@ def test_outgoing_manual_message_disables_bot(client: TestClient, sent: list) ->
     assert sent == []
 
 
-def test_outgoing_api_message_does_not_disable_bot(client: TestClient, sent: list) -> None:
+def test_outgoing_api_message_does_not_disable_bot(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi", "M1"))
 
     post(client, outgoing("outgoingAPIMessageReceived"))
@@ -195,7 +266,7 @@ def test_outgoing_api_message_does_not_disable_bot(client: TestClient, sent: lis
     assert user["flow"] != "human"
 
 
-def test_reset_starts_onboarding_again(client: TestClient, sent: list) -> None:
+def test_reset_starts_onboarding_again(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi", "M1"))
     post(client, incoming("1", "M2"))
     sent.clear()
@@ -205,38 +276,34 @@ def test_reset_starts_onboarding_again(client: TestClient, sent: list) -> None:
     assert json_store.get_user(CHAT_ID) is None
 
     post(client, incoming("hi", "M3"))
-    assert sent == [(CHAT_ID, he.LANGUAGE_MENU)]
+    assert sent.menus() == [he.LANGUAGE_BUTTONS]
     assert json_store.get_user(CHAT_ID)["step"] == 1
 
 
-def test_invalid_language_choice_repeats_menu(client: TestClient, sent: list) -> None:
+def test_invalid_language_choice_repeats_menu(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi", "M1"))
     sent.clear()
 
     post(client, incoming("maybe later", "M2"))
 
-    assert sent == [
-        (CHAT_ID, he.INVALID_LANGUAGE_CHOICE),
-        (CHAT_ID, he.LANGUAGE_MENU),
-    ]
+    assert sent.texts() == [he.INVALID_LANGUAGE_CHOICE, he.LANGUAGE_BODY]
+    assert sent.menus() == [he.LANGUAGE_BUTTONS]
     assert json_store.get_user(CHAT_ID)["step"] == 1
 
 
-def test_invalid_interest_choice_repeats_menu(client: TestClient, sent: list) -> None:
+def test_invalid_interest_choice_repeats_menu(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi", "M1"))
     post(client, incoming("2", "M2"))
     sent.clear()
 
-    post(client, incoming("9", "M3"))
+    post(client, incoming("4", "M3"))
 
-    assert sent == [
-        (CHAT_ID, en.INVALID_INTEREST_CHOICE),
-        (CHAT_ID, en.INTEREST_MENU),
-    ]
+    assert sent.texts() == [en.INVALID_INTEREST_CHOICE, en.INTEREST_BODY]
+    assert sent.menus() == [en.INTEREST_BUTTONS]
     assert json_store.get_user(CHAT_ID)["flow"] is None
 
 
-def test_missing_users_file_is_created(sent: list) -> None:
+def test_missing_users_file_is_created(sent: Outbox) -> None:
     path = Path(settings.data_file_path)
     assert not path.exists()
 
@@ -248,7 +315,7 @@ def test_missing_users_file_is_created(sent: list) -> None:
     assert CHAT_ID in json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_completed_onboarding_does_not_restart(client: TestClient, sent: list) -> None:
+def test_completed_onboarding_does_not_restart(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi", "M1"))
     post(client, incoming("1", "M2"))
     post(client, incoming("1", "M3"))
@@ -260,7 +327,7 @@ def test_completed_onboarding_does_not_restart(client: TestClient, sent: list) -
     assert json_store.get_user(CHAT_ID)["step"] == 3
 
 
-def test_processed_message_ids_are_capped(sent: list) -> None:
+def test_processed_message_ids_are_capped(sent: Outbox) -> None:
     json_store.create_user(CHAT_ID)
     for index in range(json_store.MAX_PROCESSED_MESSAGE_IDS + 20):
         json_store.mark_message_processed(CHAT_ID, f"ID{index}")
@@ -270,7 +337,7 @@ def test_processed_message_ids_are_capped(sent: list) -> None:
     assert ids[-1] == f"ID{json_store.MAX_PROCESSED_MESSAGE_IDS + 19}"
 
 
-def test_admin_requires_key(client: TestClient, sent: list) -> None:
+def test_admin_requires_key(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi"))
 
     assert client.get(f"/admin/user/{CHAT_ID}").status_code == 401
@@ -281,7 +348,7 @@ def test_admin_requires_key(client: TestClient, sent: list) -> None:
     assert response.json()["user"]["step"] == 1
 
 
-def test_admin_pause_and_resume(client: TestClient, sent: list) -> None:
+def test_admin_pause_and_resume(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi"))
     headers = {"X-Admin-Key": ADMIN_KEY}
 

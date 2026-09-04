@@ -6,6 +6,13 @@ Request format (https://green-api.com/en/docs/request-format/):
 sendMessage (https://green-api.com/en/docs/api/sending/SendMessage/):
     POST body {"chatId": "<id>@c.us", "message": "..."}
     response  {"idMessage": "3EB0C767D097B7C7C030"}
+
+sendInteractiveButtons (https://green-api.com/en/docs/api/sending/SendInteractiveButtons/):
+    POST body {"chatId": ..., "header": ..., "body": ..., "footer": ...,
+               "buttons": [{"type": "reply", "buttonId": "1", "buttonText": "..."}]}
+    response  {"idMessage": ...}
+    Limits: at most 3 buttons, buttonText at most 25 characters.
+    GREEN-API marks this method as beta, so callers must handle GreenAPIError.
 """
 
 from __future__ import annotations
@@ -72,3 +79,45 @@ async def send_text(chat_id: str, message: str) -> dict[str, Any]:
 
     logger.info("Sent message %s to %s", body["idMessage"], chat_id)
     return body
+
+
+# GREEN-API limits for sendInteractiveButtons.
+MAX_BUTTONS = 3
+MAX_BUTTON_TEXT_LENGTH = 25
+
+
+async def send_buttons(
+    chat_id: str,
+    body: str,
+    buttons: list[dict[str, Any]],
+    header: str | None = None,
+    footer: str | None = None,
+) -> dict[str, Any]:
+    """Send an interactive button menu.
+
+    Raises GreenAPIError if the menu breaks a documented limit or if GREEN-API
+    rejects the call - callers are expected to fall back to a plain text menu.
+    """
+    if not 1 <= len(buttons) <= MAX_BUTTONS:
+        raise GreenAPIError(f"sendInteractiveButtons allows 1-{MAX_BUTTONS} buttons")
+    for button in buttons:
+        if len(button.get("buttonText", "")) > MAX_BUTTON_TEXT_LENGTH:
+            raise GreenAPIError(
+                f"buttonText longer than {MAX_BUTTON_TEXT_LENGTH} characters: "
+                f"{button.get('buttonId')}"
+            )
+
+    payload: dict[str, Any] = {"chatId": chat_id, "body": body, "buttons": buttons}
+    if header:
+        payload["header"] = header
+    if footer:
+        payload["footer"] = footer
+
+    response = await _post("sendInteractiveButtons", payload)
+
+    if not response.get("idMessage"):
+        logger.error("%s response has no idMessage", _safe_label("sendInteractiveButtons"))
+        raise GreenAPIError("sendInteractiveButtons response has no idMessage")
+
+    logger.info("Sent button menu %s to %s", response["idMessage"], chat_id)
+    return response

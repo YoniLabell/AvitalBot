@@ -6,8 +6,10 @@ no database, no background workers.
 
 What it does:
 
-1. A new customer sends any text → the bot replies with a bilingual language menu.
-2. The customer picks Hebrew or English → the bot sends the interest menu in that language.
+1. A new customer sends any text → the bot replies with a bilingual language menu
+   (two tappable buttons: עברית / English).
+2. The customer picks a language → the bot sends the interest menu in that language
+   (three tappable buttons: Pilates / Barre / instructor course).
 3. The customer picks an interest → the bot sends that flow's messages (placeholders for now).
 4. The moment the business owner replies manually from WhatsApp, the bot goes silent for that chat.
 
@@ -98,12 +100,32 @@ configuration change, not a rewrite:
 
 No bot or flow code changes.
 
+## Menus are interactive buttons
+
+Both menus are sent with GREEN-API's
+[`sendInteractiveButtons`](https://green-api.com/en/docs/api/sending/SendInteractiveButtons/).
+GREEN-API limits a message to **3 buttons**, each with a **`buttonText` of at most 25
+characters**; `app/services/green_api.py` enforces both before sending.
+
+GREEN-API marks that method as **beta**, so the bot never depends on it:
+
+- If the button call fails, the same menu is re-sent as a numbered text message
+  (`1. …` / `2. …` / `3. …`) built from the very same wording — nothing to maintain twice.
+- A customer is understood whether they **tap a button**, **type the number**, or
+  **type the button's label** ("English", "barre").
+
 ## Editing the wording
 
-All customer-facing text lives in `app/messages/he.py` and `app/messages/en.py`.
-The flow placeholders (`[TODO: ...]`) are in `FLOW_MESSAGES` — each interest maps to a
-list of 1–3 messages that are sent in order. Edit those files only; the webhook logic
-does not need to change.
+All customer-facing text lives in `app/messages/he.py` and `app/messages/en.py`:
+
+- `LANGUAGE_BODY` / `LANGUAGE_BUTTONS` — the opening bilingual menu.
+- `INTEREST_BODY` / `INTEREST_BUTTONS` — the three interest buttons.
+- `FLOW_MESSAGES` — the `[TODO: ...]` placeholders, one list of 1–3 messages per interest.
+
+Each button's `buttonId` is what routes the customer: `1` → `pilates`, `2` → `barre`,
+`3` → `instructor_course` (see `FLOW_BY_BUTTON_ID` in `app/services/bot.py`). Change a
+`buttonText` freely; change a `buttonId` only together with that mapping. Keep labels
+within 25 characters, and keep the list at three buttons or fewer.
 
 ## Deploy to Render (Free)
 
