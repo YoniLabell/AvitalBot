@@ -100,6 +100,12 @@ def init_storage() -> None:
             _write_all({})
 
 
+def all_users() -> dict[str, dict[str, Any]]:
+    """Every stored customer. Used by the diagnostics endpoint."""
+    with _lock:
+        return _read_all()
+
+
 def get_user(chat_id: str) -> dict[str, Any] | None:
     with _lock:
         return _read_all().get(chat_id)

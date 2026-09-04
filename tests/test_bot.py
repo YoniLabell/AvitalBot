@@ -354,3 +354,155 @@ def test_admin_pause_and_resume(client: TestClient, sent: Outbox) -> None:
 
     assert client.post(f"/admin/pause/{CHAT_ID}", headers=headers).json()["user"]["bot_enabled"] is False
     assert client.post(f"/admin/resume/{CHAT_ID}", headers=headers).json()["user"]["bot_enabled"] is True
+
+
+# --- regression tests for the bugs this logging pass uncovered -------------
+
+
+def test_blank_env_var_does_not_override_the_default_api_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Copying .env.example used to leave GREEN_API_API_URL as an empty string,
+    which produced a URL with no scheme and an unexplained send failure."""
+    from app.config import DEFAULT_API_URL, _build_settings
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "GREEN_API_INSTANCE_ID=1101234567\nGREEN_API_TOKEN=abc\nGREEN_API_API_URL=\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    for name in ("GREEN_API_API_URL", "GREEN_API_INSTANCE_ID", "GREEN_API_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+    fresh = _build_settings()
+
+    assert fresh.green_api_api_url == DEFAULT_API_URL
+
+
+def test_api_url_without_a_scheme_gets_https(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.config import _build_settings
+
+    monkeypatch.setenv("GREEN_API_API_URL", "7105.api.greenapi.com/")
+
+    assert _build_settings().green_api_api_url == "https://7105.api.greenapi.com"
+
+
+def test_missing_credentials_raise_a_named_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "green_api_token", "")
+
+    with pytest.raises(green_api.GreenAPIError, match="GREEN_API_TOKEN"):
+        green_api._check_configured("sendMessage")
+
+
+def test_failed_send_leaves_the_message_unprocessed(
+    client: TestClient, sent: Outbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A send failure must not mark the message processed, or GREEN-API's retry
+    would be dropped as a duplicate and the customer would get nothing."""
+
+    working_send_buttons = green_api.send_buttons
+    working_send_text = green_api.send_text
+
+    async def always_fails(*args, **kwargs):
+        raise green_api.GreenAPIError("GREEN-API is down")
+
+    monkeypatch.setattr(green_api, "send_buttons", always_fails)
+    monkeypatch.setattr(green_api, "send_text", always_fails)
+
+    response = client.post("/webhook/green-api", json=incoming("hi", "RETRY"))
+    assert response.status_code == 200
+    assert response.json()["status"] == "error"
+    # The half-created customer was rolled back, so the retry starts clean.
+    assert json_store.get_user(CHAT_ID) is None
+
+    # GREEN-API recovers and redelivers the same notification.
+    monkeypatch.setattr(green_api, "send_buttons", working_send_buttons)
+    monkeypatch.setattr(green_api, "send_text", working_send_text)
+    post(client, incoming("hi", "RETRY"))
+
+    assert sent.menus() == [he.LANGUAGE_BUTTONS]
+
+
+def test_webhook_error_response_names_the_cause(
+    client: TestClient, sent: Outbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def always_fails(*args, **kwargs):
+        raise green_api.GreenAPIError("HTTP 401: token is wrong")
+
+    monkeypatch.setattr(green_api, "send_buttons", always_fails)
+    monkeypatch.setattr(green_api, "send_text", always_fails)
+
+    body = client.post("/webhook/green-api", json=incoming("hi")).json()
+
+    assert body["status"] == "error"
+    assert "token is wrong" in body["reason"]
+
+
+def test_diagnostics_reports_a_bad_setup(
+    client: TestClient, sent: Outbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_state():
+        return {"stateInstance": "notAuthorized"}
+
+    async def fake_settings():
+        return {
+            "webhookUrl": "https://example.com/wrong-path",
+            "webhookUrlToken": "",
+            "incomingWebhook": "yes",
+            "outgoingMessageWebhook": "no",
+            "outgoingAPIMessageWebhook": "yes",
+            "stateWebhook": "no",
+        }
+
+    monkeypatch.setattr(green_api, "get_state_instance", fake_state)
+    monkeypatch.setattr(green_api, "get_settings", fake_settings)
+
+    body = client.get("/admin/diagnostics", headers={"X-Admin-Key": ADMIN_KEY}).json()
+
+    assert body["status"] == "problems_found"
+    joined = " | ".join(body["problems"])
+    assert "notAuthorized" in joined
+    assert "/webhook/green-api" in joined
+    assert "outgoingMessageWebhook" in joined
+    assert body["config"]["green_api_token_set"] is False
+
+
+def test_diagnostics_is_clean_when_everything_is_configured(
+    client: TestClient, sent: Outbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "green_api_instance_id", "1101234567")
+    monkeypatch.setattr(settings, "green_api_token", "a-token")
+
+    async def fake_state():
+        return {"stateInstance": "authorized"}
+
+    async def fake_settings():
+        return {
+            "webhookUrl": "https://bot.onrender.com/webhook/green-api",
+            "webhookUrlToken": "",
+            "incomingWebhook": "yes",
+            "outgoingMessageWebhook": "yes",
+            "outgoingAPIMessageWebhook": "yes",
+            "stateWebhook": "no",
+        }
+
+    monkeypatch.setattr(green_api, "get_state_instance", fake_state)
+    monkeypatch.setattr(green_api, "get_settings", fake_settings)
+
+    body = client.get("/admin/diagnostics", headers={"X-Admin-Key": ADMIN_KEY}).json()
+
+    assert body["problems"] == []
+    assert body["status"] == "ok"
+
+
+def test_diagnostics_requires_the_admin_key(client: TestClient, sent: Outbox) -> None:
+    assert client.get("/admin/diagnostics").status_code == 401
+
+
+def test_logs_never_contain_the_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "green_api_token", "super-secret-token")
+    monkeypatch.setattr(settings, "green_api_instance_id", "1101234567")
+
+    assert "super-secret-token" not in green_api._safe_url("sendMessage")
+    assert "***TOKEN***" in green_api._safe_url("sendMessage")

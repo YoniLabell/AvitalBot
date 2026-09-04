@@ -114,8 +114,12 @@ async def _send_menu(chat_id: str, body: str, buttons: list[dict[str, Any]]) -> 
     """Send a menu as interactive buttons, falling back to numbered text."""
     try:
         await green_api.send_buttons(chat_id, body, buttons)
-    except green_api.GreenAPIError:
-        logger.warning("Button menu failed for %s - sending the text menu instead", chat_id)
+    except green_api.GreenAPIError as exc:
+        logger.warning(
+            "Button menu failed for %s (%s) - falling back to the numbered text menu",
+            chat_id,
+            exc,
+        )
         await green_api.send_text(chat_id, menu_as_text(body, buttons))
 
 
@@ -139,10 +143,12 @@ async def _handle_language_choice(chat_id: str, reply: str) -> None:
         reply, messages.LANGUAGE_BUTTONS, LANGUAGE_BY_BUTTON_ID, LANGUAGE_ALIASES
     )
     if language is None:
+        logger.info("Unrecognised language choice from %s: %r - repeating menu", chat_id, reply)
         await green_api.send_text(chat_id, messages.INVALID_LANGUAGE_CHOICE)
         await _send_menu(chat_id, messages.LANGUAGE_BODY, messages.LANGUAGE_BUTTONS)
         return
 
+    logger.info("%s chose language %s", chat_id, language)
     json_store.update_user(chat_id, {"language": language, "step": STEP_AWAITING_INTEREST})
     chosen = catalogue(language)
     await _send_menu(chat_id, chosen.INTEREST_BODY, chosen.INTEREST_BUTTONS)
@@ -152,32 +158,60 @@ async def _handle_interest_choice(chat_id: str, language: str | None, reply: str
     messages = catalogue(language)
     flow = _match_choice(reply, messages.INTEREST_BUTTONS, FLOW_BY_BUTTON_ID)
     if flow is None:
+        logger.info("Unrecognised interest choice from %s: %r - repeating menu", chat_id, reply)
         await green_api.send_text(chat_id, messages.INVALID_INTEREST_CHOICE)
         await _send_menu(chat_id, messages.INTEREST_BODY, messages.INTEREST_BUTTONS)
         return
 
+    logger.info("%s chose flow %s", chat_id, flow)
     json_store.update_user(chat_id, {"flow": flow, "step": STEP_DONE})
     await _send_all(chat_id, messages.FLOW_MESSAGES[flow])
 
 
 async def handle_incoming_message(chat_id: str, message_id: str, reply: str) -> None:
-    """Advance the flow for one incoming customer message."""
+    """Advance the flow for one incoming customer message.
+
+    The message is marked processed only after it has been handled without
+    error, so that a send failure lets GREEN-API's retry reach the customer
+    instead of being silently dropped as a duplicate.
+    """
     user = json_store.get_user(chat_id)
 
     if user is None:
         # A chatId we have never seen is a new inquiry.
+        logger.info("New customer %s - starting onboarding", chat_id)
         json_store.create_user(chat_id)
+        try:
+            await _start_onboarding(chat_id)
+        except Exception:
+            # Roll back so the retry is treated as a new inquiry again.
+            logger.exception("Onboarding failed for %s - removing the new record", chat_id)
+            json_store.reset_user(chat_id)
+            raise
         json_store.mark_message_processed(chat_id, message_id)
-        await _start_onboarding(chat_id)
         return
 
-    json_store.mark_message_processed(chat_id, message_id)
-
     if not user.get("bot_enabled", True):
-        logger.info("Bot disabled for %s - ignoring incoming message", chat_id)
+        logger.info(
+            "Bot is OFF for %s (flow=%s) - ignoring the message. "
+            "Use POST /admin/resume/%s to turn it back on.",
+            chat_id,
+            user.get("flow"),
+            chat_id,
+        )
+        json_store.mark_message_processed(chat_id, message_id)
         return
 
     step = user.get("step", STEP_NEW)
+    logger.info(
+        "Handling %r from %s (step=%s, language=%s, flow=%s)",
+        reply,
+        chat_id,
+        step,
+        user.get("language"),
+        user.get("flow"),
+    )
+
     if step == STEP_NEW:
         await _start_onboarding(chat_id)
     elif step == STEP_AWAITING_LANGUAGE:
@@ -188,7 +222,9 @@ async def handle_incoming_message(chat_id: str, message_id: str, reply: str) -> 
         # Onboarding is finished. Never restart it automatically - from here on
         # the business owner answers, and their first manual reply arrives as
         # outgoingMessageReceived and disables the bot for good.
-        logger.info("Onboarding complete for %s - no automatic reply", chat_id)
+        logger.info("Onboarding already complete for %s - no automatic reply", chat_id)
+
+    json_store.mark_message_processed(chat_id, message_id)
 
 
 async def handle_webhook(payload: dict[str, Any]) -> None:
@@ -199,30 +235,42 @@ async def handle_webhook(payload: dict[str, Any]) -> None:
     if type_webhook == OUTGOING_MANUAL_MESSAGE:
         # Sent by the owner from WhatsApp / Web / Desktop - a human took over.
         if chat_id:
+            logger.info("Manual reply detected in %s - switching the bot OFF", chat_id)
             handover_to_human(chat_id)
+        else:
+            logger.warning("%s webhook without a chatId - ignoring", OUTGOING_MANUAL_MESSAGE)
         return
 
     if type_webhook == OUTGOING_API_MESSAGE:
         # Our own message, sent through GREEN-API. Never a human takeover.
-        logger.debug("Ignoring our own outgoing API message to %s", chat_id)
+        logger.info("Our own API message to %s - bot stays ON", chat_id)
         return
 
     if type_webhook != INCOMING_MESSAGE:
-        logger.debug("Ignoring webhook type %s", type_webhook)
+        logger.info("Ignoring webhook type %r (nothing to do)", type_webhook)
         return
 
     message_id = payload.get("idMessage")
     if not chat_id or not message_id:
-        logger.warning("Incoming webhook without chatId or idMessage - ignoring")
+        logger.warning(
+            "Incoming webhook is missing chatId (%r) or idMessage (%r) - ignoring",
+            chat_id,
+            message_id,
+        )
         return
 
-    reply = extract_reply(payload.get("messageData") or {})
+    message_data = payload.get("messageData") or {}
+    reply = extract_reply(message_data)
     if reply is None:
-        logger.info("Unsupported message type from %s - ignoring", chat_id)
+        logger.info(
+            "Ignoring %s from %s - the bot only understands text and button replies",
+            message_data.get("typeMessage"),
+            chat_id,
+        )
         return
 
     if json_store.has_processed_message(chat_id, message_id):
-        logger.info("Duplicate notification %s for %s - ignoring", message_id, chat_id)
+        logger.info("Duplicate notification %s for %s - already answered", message_id, chat_id)
         return
 
     await handle_incoming_message(chat_id, message_id, reply)

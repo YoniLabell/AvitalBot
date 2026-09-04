@@ -50,8 +50,10 @@ pytest
 | `GREEN_API_API_URL` | yes | API host, e.g. `https://api.green-api.com` or your instance host `https://7105.api.greenapi.com`. |
 | `ADMIN_API_KEY` | yes | Any long random string. Required by the `/admin/*` endpoints. |
 | `DATA_FILE_PATH` | no | Where customer state is written. `data/users.json` on Render Free. |
+| `LOG_LEVEL` | no | `INFO` by default. `DEBUG` also logs every webhook body and GREEN-API response. |
 
-Never commit `.env`.
+Never commit `.env`. A blank value (`GREEN_API_API_URL=`) is treated as "not set" and
+falls back to the default, and a host pasted without a scheme gets `https://` added.
 
 ## Endpoints
 
@@ -59,6 +61,7 @@ Never commit `.env`.
 | --- | --- | --- |
 | `GET` | `/health` | Render health check. Returns `{"status": "ok"}`. Never contacts GREEN-API. |
 | `POST` | `/webhook/green-api` | GREEN-API notifications. Always returns HTTP 200. |
+| `GET` | `/admin/diagnostics` | **Start here when something is wrong.** Checks the whole setup. |
 | `GET` | `/admin/user/{chat_id}` | Read a customer's stored state. |
 | `POST` | `/admin/pause/{chat_id}` | Stop automatic replies for a customer. |
 | `POST` | `/admin/resume/{chat_id}` | Re-enable automatic replies. |
@@ -99,6 +102,71 @@ configuration change, not a rewrite:
 3. Set `DATA_FILE_PATH=/var/data/users.json`.
 
 No bot or flow code changes.
+
+## When something is not working
+
+**1. Ask the service what is wrong.** This one endpoint checks the configuration, the
+GREEN-API instance state and the instance's webhook settings, and answers in plain words:
+
+```bash
+curl -H "X-Admin-Key: $ADMIN_API_KEY" https://<service-name>.onrender.com/admin/diagnostics
+```
+
+```json
+{
+  "status": "problems_found",
+  "problems": [
+    "GREEN-API instance state is 'notAuthorized', expected 'authorized'. Scan the QR code again in the GREEN-API console.",
+    "The instance webhookUrl is 'https://old-bot.example.com/hook', which does not end in /webhook/green-api - notifications are going somewhere else.",
+    "GREEN-API setting outgoingMessageWebhook is 'no', expected 'yes' - needed to detect a manual reply and switch the bot off."
+  ]
+}
+```
+
+`"status": "ok"` with an empty `problems` list means the setup is fine and the issue is
+in the conversation itself — read the logs.
+
+**2. Read the logs.** On Render: your service → **Logs**. Every startup prints the
+resolved configuration (never the secrets themselves):
+
+```text
+INFO app.main: WhatsApp flow bot starting
+INFO app.main:   GREEN_API_API_URL     = https://api.green-api.com
+INFO app.main:   GREEN_API_INSTANCE_ID = 1101234567
+INFO app.main:   GREEN_API_TOKEN       = set
+ERROR app.main: CONFIG PROBLEM: ADMIN_API_KEY is not set - the /admin endpoints will answer 503.
+```
+
+and every message is traceable end to end:
+
+```text
+INFO app.routers.webhook: Webhook received: type='incomingMessageReceived' chatId='972501112222@c.us' idMessage='F2' typeMessage='interactiveButtonsReply'
+INFO app.services.bot: Handling '1' from 972501112222@c.us (step=1, language=None, flow=None)
+INFO app.services.bot: 972501112222@c.us chose language he
+INFO app.services.green_api: Sending 3 buttons to 972501112222@c.us: ['Pilates מכשירים', 'Barre', 'קורס הכשרת מדריכות']
+INFO app.services.green_api: GREEN-API -> POST https://api.green-api.com/waInstance1101234567/sendInteractiveButtons/***TOKEN***
+INFO app.services.green_api: Sent button menu BAE5A7BA6D6E28EB to 972501112222@c.us
+```
+
+The API token is masked as `***TOKEN***` everywhere, including inside error messages.
+Set `LOG_LEVEL=DEBUG` to also log every webhook body and every GREEN-API response body.
+
+**3. Common causes, and the log line that shows each one.**
+
+| Symptom in the log | Cause |
+| --- | --- |
+| `CONFIG PROBLEM: GREEN_API_TOKEN is not set` | The env var is missing on Render. |
+| `GREEN_API_API_URL looks wrong` | The URL has no `http://` or `https://`. |
+| `returned HTTP 401` | `GREEN_API_TOKEN` does not match the instance. |
+| `returned HTTP 404` | `GREEN_API_INSTANCE_ID` or `GREEN_API_API_URL` is wrong. |
+| `returned HTTP 466` | The GREEN-API instance is out of quota. |
+| `Bot is OFF for … - ignoring the message` | A manual reply switched the bot off. `POST /admin/resume/{chat_id}` turns it back on. |
+| `Ignoring imageMessage from …` | The customer sent media; the bot only reads text and button taps. |
+| `Duplicate notification … - already answered` | GREEN-API redelivered a notification. Working as intended. |
+| Nothing at all in the log | The webhook never arrived — check `webhookUrl` and `incomingWebhook` in `/admin/diagnostics`. |
+
+Every webhook still answers HTTP 200 (so GREEN-API stops retrying), but a failed one
+returns `{"status": "error", "reason": "..."}` naming the cause.
 
 ## Menus are interactive buttons
 

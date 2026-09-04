@@ -21,3 +21,6 @@ services:
       # /var/data, change this to /var/data/users.json - nothing else changes.
       - key: DATA_FILE_PATH
         value: data/users.json
+      # Set to DEBUG to log every webhook body and GREEN-API response.
+      - key: LOG_LEVEL
+        value: INFO
