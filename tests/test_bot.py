@@ -71,16 +71,19 @@ def incoming(text: str, message_id: str = "MSG1", chat_id: str = CHAT_ID) -> dic
 
 
 def button_tap(button_id: str, button_text: str, message_id: str = "MSG1", chat_id: str = CHAT_ID) -> dict:
-    """A GREEN-API interactiveButtonsReply notification (a tapped button)."""
+    """A tapped button, in the shape GREEN-API documents for a button selection:
+    green-api.com/en/docs/api/receiving/notifications-format/selected-buttons/ButtonsResponseMessage/
+    """
     return _notification(
         "incomingMessageReceived",
         message_id,
         chat_id,
         {
-            "typeMessage": "interactiveButtonsReply",
-            "interactiveButtonsReply": {
-                "contentText": "menu body",
-                "buttons": [{"type": "reply", "buttonId": button_id, "buttonText": button_text}],
+            "typeMessage": "buttonsResponseMessage",
+            "buttonsResponseMessage": {
+                "stanzaId": "BAE53AFDD5F0C137",
+                "selectedButtonId": button_id,
+                "selectedButtonText": button_text,
             },
         },
     )
@@ -141,6 +144,30 @@ def test_language_menu_is_sent_as_two_buttons(client: TestClient, sent: Outbox) 
     assert sent.menus() == [he.LANGUAGE_BUTTONS]
     assert sent.texts() == [he.LANGUAGE_BODY]
     assert [button["buttonText"] for button in sent.menus()[0]] == ["עברית 🇮🇱", "English 🇬🇧"]
+
+
+def test_menu_notification_is_not_mistaken_for_a_tap(client: TestClient, sent: Outbox) -> None:
+    """interactiveButtonsReply is a button MENU arriving as a message, not a tap:
+    it echoes every button, so no choice can be read out of it."""
+    post(client, incoming("hi", "M1"))
+    sent.clear()
+
+    post(client, _notification("incomingMessageReceived", "M2", CHAT_ID, {
+        "typeMessage": "interactiveButtonsReply",
+        "interactiveButtonsReply": {
+            "titleText": "Header",
+            "contentText": "Body",
+            "footerText": "Footer",
+            "buttons": [
+                {"type": "reply", "buttonId": "1", "buttonText": "First"},
+                {"type": "reply", "buttonId": "2", "buttonText": "Second"},
+                {"type": "reply", "buttonId": "3", "buttonText": "Third"},
+            ],
+        },
+    }))
+
+    assert sent == []
+    assert json_store.get_user(CHAT_ID)["language"] is None
 
 
 def test_interest_menu_has_exactly_three_buttons(client: TestClient, sent: Outbox) -> None:
@@ -599,3 +626,104 @@ def test_both_languages_define_the_same_flows(sent: Outbox) -> None:
     assert set(en.FLOW_BODY) == flows
     assert set(he.FLOW_BUTTONS) == flows
     assert set(en.FLOW_BUTTONS) == flows
+
+
+# --- every button-reply shape GREEN-API documents --------------------------
+
+
+@pytest.mark.parametrize(
+    ("message_data", "expected"),
+    [
+        pytest.param(
+            {
+                "typeMessage": "buttonsResponseMessage",
+                "buttonsResponseMessage": {
+                    "stanzaId": "BAE53AFDD5F0C137",
+                    "selectedButtonId": "1",
+                    "selectedButtonText": "Green",
+                },
+            },
+            "1",
+            id="buttonsResponseMessage",
+        ),
+        pytest.param(
+            {
+                "typeMessage": "templateButtonsReplyMessage",
+                "templateButtonsReplyMessage": {
+                    "stanzaId": "BAE5",
+                    "selectedIndex": 1,
+                    "selectedId": "2",
+                    "selectedDisplayText": "Barre",
+                },
+            },
+            "2",
+            id="templateButtonsReplyMessage",
+        ),
+        pytest.param(
+            {
+                "typeMessage": "listResponseMessage",
+                "listResponseMessage": {
+                    "stanzaId": "BAE5",
+                    "singleSelectReply": {"selectedRowId": "3"},
+                },
+            },
+            "3",
+            id="listResponseMessage",
+        ),
+        pytest.param(
+            {
+                "typeMessage": "buttonsResponseMessage",
+                "buttonsResponseMessage": {"selectedButtonText": "English 🇬🇧"},
+            },
+            "English 🇬🇧",
+            id="label-only",
+        ),
+        pytest.param(
+            {
+                "typeMessage": "buttonsResponseMessage",
+                "buttonsResponseMessage": {"selectedButtonId": 2},
+            },
+            "2",
+            id="numeric-id",
+        ),
+        pytest.param(
+            {"typeMessage": "textMessage", "textMessageData": {"textMessage": "1"}},
+            "1",
+            id="plain-text",
+        ),
+        pytest.param({"typeMessage": "imageMessage"}, None, id="image-ignored"),
+    ],
+)
+def test_extract_reply_handles_every_documented_shape(message_data, expected) -> None:
+    from app.services.bot import extract_reply
+
+    assert extract_reply(message_data) == expected
+
+
+def test_unreadable_button_reply_is_logged_in_full(caplog: pytest.LogCaptureFixture) -> None:
+    """The one thing needed to support a new shape is the payload itself."""
+    from app.services.bot import extract_reply
+
+    message_data = {
+        "typeMessage": "buttonsResponseMessage",
+        "buttonsResponseMessage": {"somethingUnexpected": "xyz"},
+    }
+    with caplog.at_level("WARNING"):
+        assert extract_reply(message_data) is None
+
+    assert "somethingUnexpected" in caplog.text
+
+
+def test_a_tap_is_understood_at_every_step(client: TestClient, sent: Outbox) -> None:
+    """Language, interest and follow-up menus all accept a real button tap."""
+    post(client, incoming("hi", "T1"))
+    post(client, button_tap("2", "English 🇬🇧", "T2"))
+    assert json_store.get_user(CHAT_ID)["language"] == "en"
+
+    post(client, button_tap("1", "Pilates Equipment", "T3"))
+    assert json_store.get_user(CHAT_ID)["flow"] == "pilates"
+
+    sent.clear()
+    post(client, button_tap("2", "Book a trial class", "T4"))
+    assert sent.texts() == en.FLOW_ANSWERS["pilates"]["2"]
+    assert json_store.get_user(CHAT_ID)["step"] == 4

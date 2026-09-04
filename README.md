@@ -185,6 +185,20 @@ GREEN-API marks that method as **beta**, so the bot never depends on it:
 - A customer is understood whether they **tap a button**, **type the number**, or
   **type the button's label** ("English", "barre").
 
+A tap arrives as its own notification type, not as text. GREEN-API documents three
+shapes and the bot reads all of them:
+
+| `typeMessage` | Where the choice is |
+| --- | --- |
+| `buttonsResponseMessage` | `selectedButtonId` / `selectedButtonText` |
+| `templateButtonsReplyMessage` | `selectedId` / `selectedDisplayText` |
+| `listResponseMessage` | `singleSelectReply.selectedRowId` |
+
+`interactiveButtonsReply` is **not** a tap — it is a button menu arriving as a message,
+echoing every button with no selection marker, so nothing is read from it. If a tap ever
+arrives in a shape the bot cannot read, it logs `Could not tell which button was tapped`
+together with the complete `messageData`, which is all that is needed to add that shape.
+
 ## Editing the wording
 
 All customer-facing text lives in `app/messages/he.py` and `app/messages/en.py`:

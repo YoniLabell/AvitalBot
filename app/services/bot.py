@@ -46,6 +46,30 @@ def handover_to_human(chat_id: str) -> None:
     logger.info("Handed chat %s over to a human", chat_id)
 
 
+# Sub-objects of messageData that can carry a tapped button, and the keys
+# inside them that hold the customer's choice. Confirmed against
+# green-api.com/en/docs/api/receiving/notifications-format/selected-buttons/:
+#   buttonsResponseMessage      {stanzaId, selectedButtonId, selectedButtonText}
+#   templateButtonsReplyMessage {stanzaId, selectedIndex, selectedId, selectedDisplayText}
+#   listResponseMessage         the chosen row, under singleSelectReply
+# interactiveButtonsReply is the *menu* arriving as a message, not a tap, so it
+# normally carries no selection - it is scanned last, just in case.
+BUTTON_REPLY_TYPES = (
+    "buttonsResponseMessage",
+    "templateButtonsReplyMessage",
+    "listResponseMessage",
+    "interactiveButtonsReply",
+)
+
+SELECTION_KEYS = (
+    "selectedButtonId",
+    "selectedId",
+    "selectedRowId",
+    "selectedButtonText",
+    "selectedDisplayText",
+)
+
+
 def extract_reply(message_data: dict[str, Any]) -> str | None:
     """Pull the customer's answer out of a GREEN-API messageData block.
 
@@ -65,17 +89,38 @@ def extract_reply(message_data: dict[str, Any]) -> str | None:
         block = message_data.get("extendedTextMessageData") or {}
         return _as_text(block.get("text"))
 
-    # A tapped button. GREEN-API reports these under a few different names
-    # depending on how the menu was sent, so check the known shapes.
-    for key in ("interactiveButtonsReply", "buttonsResponseMessage", "templateButtonReplyMessage"):
+    choice = _extract_button_choice(message_data)
+    if choice is not None:
+        return choice
+
+    if type_message in BUTTON_REPLY_TYPES:
+        # A button-shaped notification we could not read. Log the whole block:
+        # this is the one thing needed to add support for its shape.
+        logger.warning(
+            "Could not tell which button was tapped in a %s. Full messageData: %s",
+            type_message,
+            message_data,
+        )
+    return None
+
+
+def _extract_button_choice(message_data: dict[str, Any]) -> str | None:
+    """Find the tapped button's id or label, whatever shape it arrived in."""
+    for key in BUTTON_REPLY_TYPES:
         block = message_data.get(key)
         if not isinstance(block, dict):
             continue
-        for field in ("selectedButtonId", "selectedId", "selectedButtonText", "selectedDisplayText"):
-            value = _as_text(block.get(field))
-            if value:
-                return value
-        # Some notifications carry the tapped button as a single-entry list.
+
+        # listResponseMessage nests the chosen row one level down.
+        for candidate in (block, block.get("singleSelectReply")):
+            if not isinstance(candidate, dict):
+                continue
+            for field in SELECTION_KEYS:
+                value = candidate.get(field)
+                if value not in (None, ""):
+                    return str(value).strip()
+
+        # An unambiguous single-button payload: that button is the tapped one.
         buttons = block.get("buttons")
         if isinstance(buttons, list) and len(buttons) == 1 and isinstance(buttons[0], dict):
             return _as_text(buttons[0].get("buttonId")) or _as_text(buttons[0].get("buttonText"))
