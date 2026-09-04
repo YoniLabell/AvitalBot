@@ -149,7 +149,7 @@ def test_interest_menu_has_exactly_three_buttons(client: TestClient, sent: Outbo
 
     assert json_store.get_user(CHAT_ID)["step"] == 2
     assert [button["buttonText"] for button in sent.menus()[-1]] == [
-        "Reformer Pilates",
+        "Pilates Equipment",
         "Barre",
         "Instructor Course",
     ]
@@ -179,7 +179,8 @@ def test_pilates_button_changes_flow(client: TestClient, sent: Outbox) -> None:
     user = json_store.get_user(CHAT_ID)
     assert user["flow"] == "pilates"
     assert user["step"] == 3
-    assert sent.texts()[-len(he.FLOW_MESSAGES["pilates"]):] == he.FLOW_MESSAGES["pilates"]
+    assert sent.texts()[-1] == he.FLOW_BODY["pilates"]
+    assert sent.menus()[-1] == he.FLOW_BUTTONS["pilates"]
 
 
 def test_all_three_buttons_map_to_flows(client: TestClient, sent: Outbox) -> None:
@@ -319,12 +320,13 @@ def test_completed_onboarding_does_not_restart(client: TestClient, sent: Outbox)
     post(client, incoming("hi", "M1"))
     post(client, incoming("1", "M2"))
     post(client, incoming("1", "M3"))
+    post(client, incoming("1", "M4"))
     sent.clear()
 
-    post(client, incoming("שאלה נוספת", "M4"))
+    post(client, incoming("שאלה נוספת", "M5"))
 
     assert sent == []
-    assert json_store.get_user(CHAT_ID)["step"] == 3
+    assert json_store.get_user(CHAT_ID)["step"] == 4
 
 
 def test_processed_message_ids_are_capped(sent: Outbox) -> None:
@@ -506,3 +508,94 @@ def test_logs_never_contain_the_token(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert "super-secret-token" not in green_api._safe_url("sendMessage")
     assert "***TOKEN***" in green_api._safe_url("sendMessage")
+
+
+# --- the flow sub-menus ----------------------------------------------------
+
+
+def reach_flow(client: TestClient, language_button: str, interest_button: str, prefix: str) -> None:
+    """Walk a fresh customer as far as a flow's follow-up menu."""
+    post(client, incoming("hi", f"{prefix}1"))
+    post(client, button_tap(language_button, "", f"{prefix}2"))
+    post(client, button_tap(interest_button, "", f"{prefix}3"))
+
+
+def test_flow_message_is_followed_by_its_own_menu(client: TestClient, sent: Outbox) -> None:
+    reach_flow(client, "1", "2", "B")
+
+    assert sent.texts()[-1] == he.FLOW_BODY["barre"]
+    assert [button["buttonText"] for button in sent.menus()[-1]] == [
+        "מחירים ומערכת שעות",
+        "לקבוע שיעור ניסיון",
+        "לדבר איתנו",
+    ]
+    assert json_store.get_user(CHAT_ID)["step"] == 3
+
+
+def test_sub_option_sends_its_answer(client: TestClient, sent: Outbox) -> None:
+    reach_flow(client, "2", "3", "C")
+    sent.clear()
+
+    post(client, button_tap("2", "Dates & pricing", "C4"))
+
+    assert sent.texts() == en.FLOW_ANSWERS["instructor_course"]["2"]
+    assert json_store.get_user(CHAT_ID)["step"] == 4
+
+
+def test_talk_to_us_hands_over_to_a_human(client: TestClient, sent: Outbox) -> None:
+    reach_flow(client, "2", "2", "D")
+    sent.clear()
+
+    post(client, button_tap("3", "Talk to us", "D4"))
+
+    assert sent.texts() == [en.HANDOVER_MESSAGE]
+    user = json_store.get_user(CHAT_ID)
+    assert user["bot_enabled"] is False
+    assert user["flow"] == "human"
+
+    # The bot stays quiet from now on.
+    sent.clear()
+    post(client, incoming("still there?", "D5"))
+    assert sent == []
+
+
+def test_invalid_sub_option_repeats_the_flow_menu(client: TestClient, sent: Outbox) -> None:
+    reach_flow(client, "1", "1", "E")
+    sent.clear()
+
+    post(client, incoming("אולי אחר כך", "E4"))
+
+    assert sent.texts() == [he.INVALID_INTEREST_CHOICE, he.FLOW_BODY["pilates"]]
+    assert sent.menus() == [he.FLOW_BUTTONS["pilates"]]
+    assert json_store.get_user(CHAT_ID)["step"] == 3
+
+
+def test_sub_option_accepts_a_typed_number(client: TestClient, sent: Outbox) -> None:
+    reach_flow(client, "1", "3", "F")
+    sent.clear()
+
+    post(client, incoming("1", "F4"))
+
+    assert sent.texts() == he.FLOW_ANSWERS["instructor_course"]["1"]
+
+
+def test_every_flow_button_leads_somewhere(client: TestClient, sent: Outbox) -> None:
+    """Every button must have either an answer or a handover, in both languages."""
+    for messages in (he, en):
+        for flow, buttons in messages.FLOW_BUTTONS.items():
+            assert 1 <= len(buttons) <= green_api.MAX_BUTTONS, (flow, len(buttons))
+            for button in buttons:
+                assert len(button["buttonText"]) <= green_api.MAX_BUTTON_TEXT_LENGTH, button
+            ids = {button["buttonId"] for button in buttons}
+            handled = set(messages.FLOW_ANSWERS.get(flow, {})) | messages.HANDOVER_BUTTONS[flow]
+            assert ids == handled, (flow, ids, handled)
+
+
+def test_both_languages_define_the_same_flows(sent: Outbox) -> None:
+    from app.services.bot import FLOW_BY_BUTTON_ID
+
+    flows = set(FLOW_BY_BUTTON_ID.values())
+    assert set(he.FLOW_BODY) == flows
+    assert set(en.FLOW_BODY) == flows
+    assert set(he.FLOW_BUTTONS) == flows
+    assert set(en.FLOW_BUTTONS) == flows

@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 STEP_NEW = 0
 STEP_AWAITING_LANGUAGE = 1
 STEP_AWAITING_INTEREST = 2
-STEP_DONE = 3
+STEP_AWAITING_DETAIL = 3
+STEP_FINISHED = 4
 
 # buttonId -> stored value. The ids match the button order in app/messages/.
 LANGUAGE_BY_BUTTON_ID = {"1": "he", "2": "en"}
@@ -110,6 +111,12 @@ def _match_choice(
     return (aliases or {}).get(token)
 
 
+def _match_button_id(reply: str, buttons: list[dict[str, Any]]) -> str | None:
+    """Which of these buttons the customer picked, by id or by label."""
+    identity = {button["buttonId"]: button["buttonId"] for button in buttons}
+    return _match_choice(reply, buttons, identity)
+
+
 async def _send_menu(chat_id: str, body: str, buttons: list[dict[str, Any]]) -> None:
     """Send a menu as interactive buttons, falling back to numbered text."""
     try:
@@ -164,8 +171,36 @@ async def _handle_interest_choice(chat_id: str, language: str | None, reply: str
         return
 
     logger.info("%s chose flow %s", chat_id, flow)
-    json_store.update_user(chat_id, {"flow": flow, "step": STEP_DONE})
-    await _send_all(chat_id, messages.FLOW_MESSAGES[flow])
+    json_store.update_user(chat_id, {"flow": flow, "step": STEP_AWAITING_DETAIL})
+    await _send_menu(chat_id, messages.FLOW_BODY[flow], messages.FLOW_BUTTONS[flow])
+
+
+async def _handle_detail_choice(
+    chat_id: str, language: str | None, flow: str | None, reply: str
+) -> None:
+    """Answer the follow-up question inside a flow, or fetch a human."""
+    messages = catalogue(language)
+    buttons = messages.FLOW_BUTTONS.get(flow or "")
+    if not buttons:
+        logger.error("No sub-menu defined for flow %r - nothing to answer", flow)
+        return
+
+    button_id = _match_button_id(reply, buttons)
+    if button_id is None:
+        logger.info("Unrecognised %s choice from %s: %r - repeating menu", flow, chat_id, reply)
+        await green_api.send_text(chat_id, messages.INVALID_INTEREST_CHOICE)
+        await _send_menu(chat_id, messages.FLOW_BODY[flow], buttons)
+        return
+
+    if button_id in messages.HANDOVER_BUTTONS.get(flow, set()):
+        logger.info("%s asked to talk to a human (%s)", chat_id, flow)
+        await green_api.send_text(chat_id, messages.HANDOVER_MESSAGE)
+        handover_to_human(chat_id)
+        return
+
+    logger.info("%s chose %s option %s", chat_id, flow, button_id)
+    json_store.update_user(chat_id, {"step": STEP_FINISHED})
+    await _send_all(chat_id, messages.FLOW_ANSWERS[flow][button_id])
 
 
 async def handle_incoming_message(chat_id: str, message_id: str, reply: str) -> None:
@@ -218,6 +253,8 @@ async def handle_incoming_message(chat_id: str, message_id: str, reply: str) -> 
         await _handle_language_choice(chat_id, reply)
     elif step == STEP_AWAITING_INTEREST:
         await _handle_interest_choice(chat_id, user.get("language"), reply)
+    elif step == STEP_AWAITING_DETAIL:
+        await _handle_detail_choice(chat_id, user.get("language"), user.get("flow"), reply)
     else:
         # Onboarding is finished. Never restart it automatically - from here on
         # the business owner answers, and their first manual reply arrives as

@@ -10,8 +10,11 @@ What it does:
    (two tappable buttons: עברית / English).
 2. The customer picks a language → the bot sends the interest menu in that language
    (three tappable buttons: Pilates / Barre / instructor course).
-3. The customer picks an interest → the bot sends that flow's messages (placeholders for now).
-4. The moment the business owner replies manually from WhatsApp, the bot goes silent for that chat.
+3. The customer picks an interest → the bot sends that flow's description plus its own
+   three follow-up buttons (pricing, trial class, talk to us …).
+4. The customer picks a follow-up → the bot sends the answer, or hands the chat to a human
+   if they asked to talk to someone.
+5. The moment the business owner replies manually from WhatsApp, the bot goes silent for that chat.
 
 ---
 
@@ -186,14 +189,29 @@ GREEN-API marks that method as **beta**, so the bot never depends on it:
 
 All customer-facing text lives in `app/messages/he.py` and `app/messages/en.py`:
 
-- `LANGUAGE_BODY` / `LANGUAGE_BUTTONS` — the opening bilingual menu.
-- `INTEREST_BODY` / `INTEREST_BUTTONS` — the three interest buttons.
-- `FLOW_MESSAGES` — the `[TODO: ...]` placeholders, one list of 1–3 messages per interest.
+| Name | What it is |
+| --- | --- |
+| `LANGUAGE_BODY` / `LANGUAGE_BUTTONS` | The opening bilingual menu. |
+| `INTEREST_BODY` / `INTEREST_BUTTONS` | The three interest buttons. |
+| `FLOW_BODY[flow]` | The description sent when that interest is chosen. |
+| `FLOW_BUTTONS[flow]` | That flow's own follow-up buttons. |
+| `FLOW_ANSWERS[flow][buttonId]` | What the bot answers for a follow-up — a list of 1–3 messages. |
+| `HANDOVER_BUTTONS[flow]` | Follow-up buttons that fetch a human instead of answering. |
+| `HANDOVER_MESSAGE` | Sent just before a human takes over. |
 
-Each button's `buttonId` is what routes the customer: `1` → `pilates`, `2` → `barre`,
-`3` → `instructor_course` (see `FLOW_BY_BUTTON_ID` in `app/services/bot.py`). Change a
-`buttonText` freely; change a `buttonId` only together with that mapping. Keep labels
-within 25 characters, and keep the list at three buttons or fewer.
+Everything still marked `[TODO: ...]` needs the real wording — those are the answers
+behind each follow-up button, and the handover message.
+
+Each button's `buttonId` is what routes the customer: on the interest menu `1` → `pilates`,
+`2` → `barre`, `3` → `instructor_course` (see `FLOW_BY_BUTTON_ID` in `app/services/bot.py`).
+Change a `buttonText` freely; change a `buttonId` only together with the matching
+`FLOW_ANSWERS` / `HANDOVER_BUTTONS` entry. Keep labels within 25 characters and each menu
+at three buttons or fewer — a test enforces both, and that every button leads somewhere.
+
+The two catalogues are deliberately allowed to differ: the Hebrew Pilates menu offers
+`מחירים ומנויים` / `מערכת שעות` / `לקבוע שיעור ניסיון`, while the English one offers
+`Pricing & class schedule` / `Book a trial class` / `Talk to us`. Only the English Pilates
+menu has a "talk to us" button.
 
 ## Deploy to Render (Free)
 

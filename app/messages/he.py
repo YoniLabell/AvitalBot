@@ -28,10 +28,85 @@ INTEREST_BUTTONS = [
 
 INVALID_INTEREST_CHOICE = "לא הבנתי 🙈"
 
-# Each flow is a list of messages sent one after the other (about 1-3 each).
-# TODO: replace the placeholders below with the final business wording.
-FLOW_MESSAGES = {
-    "pilates": ["[TODO: Pilates information]"],
-    "barre": ["[TODO: Barre information]"],
-    "instructor_course": ["[TODO: Instructor course information]"],
+
+# --- the three flows -------------------------------------------------------
+
+FLOW_BODY = {
+    "pilates": (
+        "פילאטיס מכשירים 🌿\n"
+        "\n"
+        "השיעורים מתקיימים בקבוצות קטנות של עד 6 מתאמנים, עם יחס אישי "
+        "והתאמה לרמה ולצרכים של כל מתאמן.\n"
+        "\n"
+        "ניתן להתאמן במסגרת מנוי חודשי או כרטיסייה.\n"
+        "\n"
+        "מה תרצי לדעת?"
+    ),
+    "barre": (
+        "Barre 🤍\n"
+        "\n"
+        "אימון קבוצתי דינמי בקצב גבוה, שילוב של טכניקה, כוח, אירובי וקואורדינציה.\n"
+        "עבודה אינטנסיבית על כל הגוף, אתגר מדויק לשריר בשילוב עליית דופק "
+        "משאיר תחושה של אימון עצים בגוף ואנרגיה גבוהה.\n"
+        "\n"
+        "מה תרצי לדעת?"
+    ),
+    "instructor_course": (
+        "קורס הכשרת מדריכות פילאטיס 🤍\n"
+        "\n"
+        "קורס מקיף ומעמיק להכשרת מדריכות פילאטיס מזרן ומכשירים, המשלב ידע "
+        "מקצועי, הבנה תנועתית וכלים מעשיים להוראה.\n"
+        "\n"
+        "הקורס מועבר בשיתוף עם רונה שגב. יחד בנינו מערך הכשרה שמטרתו להעביר "
+        "הלאה את הידע והניסיון שצברנו לאורך השנים — ולתת לכן בסיס מקצועי, "
+        "עמוק ובטוח לעבודה כמדריכות.\n"
+        "\n"
+        "מה תרצי לדעת?"
+    ),
 }
+
+FLOW_BUTTONS = {
+    "pilates": [
+        {"type": "reply", "buttonId": "1", "buttonText": "מחירים ומנויים"},
+        {"type": "reply", "buttonId": "2", "buttonText": "מערכת שעות"},
+        {"type": "reply", "buttonId": "3", "buttonText": "לקבוע שיעור ניסיון"},
+    ],
+    "barre": [
+        {"type": "reply", "buttonId": "1", "buttonText": "מחירים ומערכת שעות"},
+        {"type": "reply", "buttonId": "2", "buttonText": "לקבוע שיעור ניסיון"},
+        {"type": "reply", "buttonId": "3", "buttonText": "לדבר איתנו"},
+    ],
+    "instructor_course": [
+        {"type": "reply", "buttonId": "1", "buttonText": "פרטים ומבנה הקורס"},
+        {"type": "reply", "buttonId": "2", "buttonText": "מועדים ועלויות"},
+        {"type": "reply", "buttonId": "3", "buttonText": "לדבר איתנו"},
+    ],
+}
+
+# What the bot answers for each sub-option, as a list of 1-3 messages.
+# TODO: replace every placeholder below with the real wording.
+FLOW_ANSWERS = {
+    "pilates": {
+        "1": ["[TODO: מחירים ומנויים - פילאטיס מכשירים]"],
+        "2": ["[TODO: מערכת שעות - פילאטיס מכשירים]"],
+        "3": ["[TODO: קביעת שיעור ניסיון - פילאטיס מכשירים]"],
+    },
+    "barre": {
+        "1": ["[TODO: מחירים ומערכת שעות - Barre]"],
+        "2": ["[TODO: קביעת שיעור ניסיון - Barre]"],
+    },
+    "instructor_course": {
+        "1": ["[TODO: פרטים ומבנה הקורס]"],
+        "2": ["[TODO: מועדים ועלויות של הקורס]"],
+    },
+}
+
+# Sub-options that hand the chat to a human instead of sending an answer.
+HANDOVER_BUTTONS = {
+    "pilates": set(),
+    "barre": {"3"},
+    "instructor_course": {"3"},
+}
+
+# TODO: the wording sent just before a human takes over.
+HANDOVER_MESSAGE = "[TODO: הודעת מעבר לנציגה]"
