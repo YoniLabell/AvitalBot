@@ -143,7 +143,8 @@ def test_language_menu_is_sent_as_two_buttons(client: TestClient, sent: Outbox) 
 
     assert sent.menus() == [he.LANGUAGE_BUTTONS]
     assert sent.texts() == [he.LANGUAGE_BODY]
-    assert [button["buttonText"] for button in sent.menus()[0]] == ["עברית 🇮🇱", "English 🇬🇧"]
+    assert [button["buttonText"] for button in sent.menus()[0]] == ["עברית", "English"]
+    assert "🇮🇱" not in str(sent.menus()[0]) and "🇬🇧" not in str(sent.menus()[0])
 
 
 def test_menu_notification_is_not_mistaken_for_a_tap(client: TestClient, sent: Outbox) -> None:
@@ -184,7 +185,7 @@ def test_interest_menu_has_exactly_three_buttons(client: TestClient, sent: Outbo
 
 def test_hebrew_selection(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi", "M1"))
-    post(client, button_tap("1", "עברית 🇮🇱", "M2"))
+    post(client, button_tap("1", "עברית", "M2"))
 
     assert json_store.get_user(CHAT_ID)["language"] == "he"
     assert sent.menus()[-1] == he.INTEREST_BUTTONS
@@ -192,7 +193,7 @@ def test_hebrew_selection(client: TestClient, sent: Outbox) -> None:
 
 def test_english_selection(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi", "M1"))
-    post(client, button_tap("2", "English 🇬🇧", "M2"))
+    post(client, button_tap("2", "English", "M2"))
 
     assert json_store.get_user(CHAT_ID)["language"] == "en"
     assert sent.menus()[-1] == en.INTEREST_BUTTONS
@@ -200,7 +201,7 @@ def test_english_selection(client: TestClient, sent: Outbox) -> None:
 
 def test_pilates_button_changes_flow(client: TestClient, sent: Outbox) -> None:
     post(client, incoming("hi", "M1"))
-    post(client, button_tap("1", "עברית 🇮🇱", "M2"))
+    post(client, button_tap("1", "עברית", "M2"))
     post(client, button_tap("1", "Pilates מכשירים", "M3"))
 
     user = json_store.get_user(CHAT_ID)
@@ -214,7 +215,7 @@ def test_all_three_buttons_map_to_flows(client: TestClient, sent: Outbox) -> Non
     for button_id, flow in (("1", "pilates"), ("2", "barre"), ("3", "instructor_course")):
         chat_id = f"9725000000{button_id}@c.us"
         post(client, incoming("hi", f"A{button_id}", chat_id))
-        post(client, button_tap("2", "English 🇬🇧", f"B{button_id}", chat_id))
+        post(client, button_tap("2", "English", f"B{button_id}", chat_id))
         label = en.INTEREST_BUTTONS[int(button_id) - 1]["buttonText"]
         post(client, button_tap(button_id, label, f"C{button_id}", chat_id))
         assert json_store.get_user(chat_id)["flow"] == flow
@@ -250,7 +251,7 @@ def test_menu_falls_back_to_text_when_buttons_fail(
 
     assert sent.menus() == []
     assert sent.texts() == [menu_as_text(he.LANGUAGE_BODY, he.LANGUAGE_BUTTONS)]
-    assert "1. עברית 🇮🇱" in sent.texts()[0]
+    assert "1. עברית" in sent.texts()[0]
 
 
 def test_disabled_customer_gets_no_reply(client: TestClient, sent: Outbox) -> None:
@@ -673,9 +674,9 @@ def test_both_languages_define_the_same_flows(sent: Outbox) -> None:
         pytest.param(
             {
                 "typeMessage": "buttonsResponseMessage",
-                "buttonsResponseMessage": {"selectedButtonText": "English 🇬🇧"},
+                "buttonsResponseMessage": {"selectedButtonText": "English"},
             },
-            "English 🇬🇧",
+            "English",
             id="label-only",
         ),
         pytest.param(
@@ -685,6 +686,60 @@ def test_both_languages_define_the_same_flows(sent: Outbox) -> None:
             },
             "2",
             id="numeric-id",
+        ),
+        # What production instances actually send. No published GREEN-API page
+        # documents this type, so the exact inner keys are matched generically.
+        pytest.param(
+            {
+                "typeMessage": "interactiveButtonsResponse",
+                "interactiveButtonsResponse": {
+                    "stanzaId": "3EB0",
+                    "selectedButtonId": "2",
+                    "selectedButtonText": "Barre",
+                },
+            },
+            "2",
+            id="interactiveButtonsResponse",
+        ),
+        pytest.param(
+            {
+                "typeMessage": "interactiveButtonsResponse",
+                "interactiveButtonsResponse": {"buttonId": "3", "buttonText": "לדבר איתנו"},
+            },
+            "3",
+            id="interactiveButtonsResponse-bare-buttonId",
+        ),
+        pytest.param(
+            {
+                "typeMessage": "interactiveButtonsResponse",
+                "interactiveButtonsResponse": {"reply": {"buttonId": "1"}},
+            },
+            "1",
+            id="interactiveButtonsResponse-nested",
+        ),
+        pytest.param(
+            {
+                "typeMessage": "someFutureButtonReply",
+                "someFutureButtonReply": {"selectedButtonId": "1"},
+            },
+            "1",
+            id="unknown-type-name-still-works",
+        ),
+        # A menu echoed back to us: every button present, none selected.
+        pytest.param(
+            {
+                "typeMessage": "interactiveButtons",
+                "interactiveButtons": {
+                    "titleText": "Header",
+                    "contentText": "Body",
+                    "buttons": [
+                        {"type": "reply", "buttonId": "1", "buttonText": "First"},
+                        {"type": "reply", "buttonId": "2", "buttonText": "Second"},
+                    ],
+                },
+            },
+            None,
+            id="echoed-menu-is-not-a-choice",
         ),
         pytest.param(
             {"typeMessage": "textMessage", "textMessageData": {"textMessage": "1"}},
@@ -700,24 +755,40 @@ def test_extract_reply_handles_every_documented_shape(message_data, expected) ->
     assert extract_reply(message_data) == expected
 
 
-def test_unreadable_button_reply_is_logged_in_full(caplog: pytest.LogCaptureFixture) -> None:
+def test_unreadable_message_is_logged_in_full(
+    client: TestClient, sent: Outbox, caplog: pytest.LogCaptureFixture
+) -> None:
     """The one thing needed to support a new shape is the payload itself."""
-    from app.services.bot import extract_reply
+    payload = _notification("incomingMessageReceived", "U1", CHAT_ID, {
+        "typeMessage": "someBrandNewType",
+        "someBrandNewType": {"somethingUnexpected": {"deeply": "nested"}},
+    })
 
-    message_data = {
-        "typeMessage": "buttonsResponseMessage",
-        "buttonsResponseMessage": {"somethingUnexpected": "xyz"},
-    }
     with caplog.at_level("WARNING"):
-        assert extract_reply(message_data) is None
+        post(client, payload)
 
     assert "somethingUnexpected" in caplog.text
+    assert "someBrandNewType" in caplog.text
+
+
+def test_ignored_media_does_not_dump_its_payload(
+    client: TestClient, sent: Outbox, caplog: pytest.LogCaptureFixture
+) -> None:
+    payload = _notification("incomingMessageReceived", "U2", CHAT_ID, {
+        "typeMessage": "imageMessage",
+        "fileMessageData": {"downloadUrl": "https://example.com/a.jpg"},
+    })
+
+    with caplog.at_level("WARNING"):
+        post(client, payload)
+
+    assert "downloadUrl" not in caplog.text
 
 
 def test_a_tap_is_understood_at_every_step(client: TestClient, sent: Outbox) -> None:
     """Language, interest and follow-up menus all accept a real button tap."""
     post(client, incoming("hi", "T1"))
-    post(client, button_tap("2", "English 🇬🇧", "T2"))
+    post(client, button_tap("2", "English", "T2"))
     assert json_store.get_user(CHAT_ID)["language"] == "en"
 
     post(client, button_tap("1", "Pilates Equipment", "T3"))
@@ -727,3 +798,30 @@ def test_a_tap_is_understood_at_every_step(client: TestClient, sent: Outbox) -> 
     post(client, button_tap("2", "Book a trial class", "T4"))
     assert sent.texts() == en.FLOW_ANSWERS["pilates"]["2"]
     assert json_store.get_user(CHAT_ID)["step"] == 4
+
+
+def test_real_interactive_buttons_response_drives_the_whole_flow(
+    client: TestClient, sent: Outbox
+) -> None:
+    """The shape seen in production: interactiveButtonsResponse at every step."""
+
+    def tap(button_id: str, message_id: str) -> None:
+        post(client, _notification("incomingMessageReceived", message_id, CHAT_ID, {
+            "typeMessage": "interactiveButtonsResponse",
+            "interactiveButtonsResponse": {
+                "stanzaId": "3EB0BD1B1CD8CB04B14D7E",
+                "selectedButtonId": button_id,
+            },
+        }))
+
+    post(client, incoming("היי", "R1"))
+    tap("1", "R2")
+    tap("3", "R3")
+    sent.clear()
+    tap("2", "R4")
+
+    user = json_store.get_user(CHAT_ID)
+    assert user["language"] == "he"
+    assert user["flow"] == "instructor_course"
+    assert user["step"] == 4
+    assert sent.texts() == he.FLOW_ANSWERS["instructor_course"]["2"]

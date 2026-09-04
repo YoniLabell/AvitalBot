@@ -46,28 +46,47 @@ def handover_to_human(chat_id: str) -> None:
     logger.info("Handed chat %s over to a human", chat_id)
 
 
-# Sub-objects of messageData that can carry a tapped button, and the keys
-# inside them that hold the customer's choice. Confirmed against
-# green-api.com/en/docs/api/receiving/notifications-format/selected-buttons/:
-#   buttonsResponseMessage      {stanzaId, selectedButtonId, selectedButtonText}
-#   templateButtonsReplyMessage {stanzaId, selectedIndex, selectedId, selectedDisplayText}
-#   listResponseMessage         the chosen row, under singleSelectReply
-# interactiveButtonsReply is the *menu* arriving as a message, not a tap, so it
-# normally carries no selection - it is scanned last, just in case.
-BUTTON_REPLY_TYPES = (
-    "buttonsResponseMessage",
-    "templateButtonsReplyMessage",
-    "listResponseMessage",
-    "interactiveButtonsReply",
-)
-
+# Where a tapped button hides. GREEN-API has several names for a button
+# selection and keeps adding more - production instances send
+# "interactiveButtonsResponse", which no published page documents - so rather
+# than matching on typeMessage, every nested object of messageData is scanned
+# for one of these keys. Lists are never scanned, so the "buttons" array of a
+# menu echoed back to us can never be mistaken for a choice.
+#
+# Documented shapes (green-api.com/.../notifications-format/selected-buttons/):
+#   buttonsResponseMessage      selectedButtonId / selectedButtonText
+#   templateButtonsReplyMessage selectedId / selectedDisplayText
+#   listResponseMessage         singleSelectReply.selectedRowId
 SELECTION_KEYS = (
     "selectedButtonId",
     "selectedId",
     "selectedRowId",
+    "buttonId",
     "selectedButtonText",
     "selectedDisplayText",
+    "buttonText",
 )
+
+# Message types the bot ignores on purpose. Anything else it cannot read gets
+# its full payload logged, so an unknown shape is diagnosable the first time.
+IGNORED_MESSAGE_TYPES = frozenset({
+    "imageMessage",
+    "videoMessage",
+    "documentMessage",
+    "audioMessage",
+    "stickerMessage",
+    "locationMessage",
+    "contactMessage",
+    "contactsArrayMessage",
+    "reactionMessage",
+    "pollMessage",
+    "pollUpdateMessage",
+    "editedMessage",
+    "deletedMessage",
+    "groupInviteMessage",
+})
+
+MAX_SCAN_DEPTH = 4
 
 
 def extract_reply(message_data: dict[str, Any]) -> str | None:
@@ -89,41 +108,23 @@ def extract_reply(message_data: dict[str, Any]) -> str | None:
         block = message_data.get("extendedTextMessageData") or {}
         return _as_text(block.get("text"))
 
-    choice = _extract_button_choice(message_data)
-    if choice is not None:
-        return choice
-
-    if type_message in BUTTON_REPLY_TYPES:
-        # A button-shaped notification we could not read. Log the whole block:
-        # this is the one thing needed to add support for its shape.
-        logger.warning(
-            "Could not tell which button was tapped in a %s. Full messageData: %s",
-            type_message,
-            message_data,
-        )
-    return None
+    return _scan_for_selection(message_data)
 
 
-def _extract_button_choice(message_data: dict[str, Any]) -> str | None:
-    """Find the tapped button's id or label, whatever shape it arrived in."""
-    for key in BUTTON_REPLY_TYPES:
-        block = message_data.get(key)
-        if not isinstance(block, dict):
-            continue
+def _scan_for_selection(value: Any, depth: int = 0) -> str | None:
+    """Find a tapped button's id or label anywhere in a notification object."""
+    if depth > MAX_SCAN_DEPTH or not isinstance(value, dict):
+        return None
 
-        # listResponseMessage nests the chosen row one level down.
-        for candidate in (block, block.get("singleSelectReply")):
-            if not isinstance(candidate, dict):
-                continue
-            for field in SELECTION_KEYS:
-                value = candidate.get(field)
-                if value not in (None, ""):
-                    return str(value).strip()
+    for key in SELECTION_KEYS:
+        found = value.get(key)
+        if isinstance(found, (str, int)) and str(found).strip():
+            return str(found).strip()
 
-        # An unambiguous single-button payload: that button is the tapped one.
-        buttons = block.get("buttons")
-        if isinstance(buttons, list) and len(buttons) == 1 and isinstance(buttons[0], dict):
-            return _as_text(buttons[0].get("buttonId")) or _as_text(buttons[0].get("buttonText"))
+    for nested in value.values():
+        found = _scan_for_selection(nested, depth + 1)
+        if found is not None:
+            return found
 
     return None
 
@@ -344,11 +345,22 @@ async def handle_webhook(payload: dict[str, Any]) -> None:
     message_data = payload.get("messageData") or {}
     reply = extract_reply(message_data)
     if reply is None:
-        logger.info(
-            "Ignoring %s from %s - the bot only understands text and button replies",
-            message_data.get("typeMessage"),
-            chat_id,
-        )
+        type_message = message_data.get("typeMessage")
+        if type_message in IGNORED_MESSAGE_TYPES:
+            logger.info(
+                "Ignoring %s from %s - the bot only understands text and button replies",
+                type_message,
+                chat_id,
+            )
+        else:
+            # An unknown shape. Log all of it: that payload is the one thing
+            # needed to support it.
+            logger.warning(
+                "Could not read a choice out of %r from %s. Full messageData: %s",
+                type_message,
+                chat_id,
+                message_data,
+            )
         return
 
     if json_store.has_processed_message(chat_id, message_id):

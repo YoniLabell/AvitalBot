@@ -12,8 +12,8 @@ LANGUAGE_BODY = (
 )
 
 LANGUAGE_BUTTONS = [
-    {"type": "reply", "buttonId": "1", "buttonText": "עברית 🇮🇱"},
-    {"type": "reply", "buttonId": "2", "buttonText": "English 🇬🇧"},
+    {"type": "reply", "buttonId": "1", "buttonText": "עברית"},
+    {"type": "reply", "buttonId": "2", "buttonText": "English"},
 ]
 
 INVALID_LANGUAGE_CHOICE = "לא הבנתי 🙈 | Sorry, I didn't get that"

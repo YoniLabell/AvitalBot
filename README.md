@@ -185,19 +185,27 @@ GREEN-API marks that method as **beta**, so the bot never depends on it:
 - A customer is understood whether they **tap a button**, **type the number**, or
   **type the button's label** ("English", "barre").
 
-A tap arrives as its own notification type, not as text. GREEN-API documents three
-shapes and the bot reads all of them:
+A tap arrives as its own notification type, not as text, and GREEN-API has several names
+for one — including `interactiveButtonsResponse`, which production instances send but no
+published documentation page describes. So the bot does **not** match on `typeMessage`:
+it scans every nested object of `messageData` for a selection key
+(`selectedButtonId`, `selectedId`, `selectedRowId`, `buttonId`, or their text
+equivalents). That covers the documented shapes —
 
 | `typeMessage` | Where the choice is |
 | --- | --- |
 | `buttonsResponseMessage` | `selectedButtonId` / `selectedButtonText` |
 | `templateButtonsReplyMessage` | `selectedId` / `selectedDisplayText` |
 | `listResponseMessage` | `singleSelectReply.selectedRowId` |
+| `interactiveButtonsResponse` | undocumented; found by the same scan |
 
-`interactiveButtonsReply` is **not** a tap — it is a button menu arriving as a message,
-echoing every button with no selection marker, so nothing is read from it. If a tap ever
-arrives in a shape the bot cannot read, it logs `Could not tell which button was tapped`
-together with the complete `messageData`, which is all that is needed to add that shape.
+— and a new one GREEN-API invents next will very likely work unchanged.
+
+Lists are never scanned, so a menu echoed back to us (`interactiveButtons` /
+`interactiveButtonsReply`, which carry every button and select none) can never be
+mistaken for a choice. Anything the bot still cannot read logs
+`Could not read a choice out of ...` with the complete `messageData` — the one thing
+needed to add support for that shape.
 
 ## Editing the wording
 
