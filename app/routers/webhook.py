@@ -26,6 +26,30 @@ def _summary(payload: dict[str, Any]) -> str:
     )
 
 
+def _ignore_reason(payload: dict[str, Any]) -> str | None:
+    """Return why an incoming chat should not reach the bot, if any.
+
+    AvitalBot is meant only for new leads. GREEN-API exposes
+    senderContactName from the current WhatsApp account's contacts, so
+    existing saved contacts are left to the studio owner. Group chats are
+    ignored as well.
+    """
+    if payload.get("typeWebhook") != bot.INCOMING_MESSAGE:
+        return None
+
+    sender = payload.get("senderData") or {}
+    chat_id = sender.get("chatId")
+
+    if isinstance(chat_id, str) and chat_id.endswith("@g.us"):
+        return "WhatsApp group"
+
+    sender_contact_name = sender.get("senderContactName")
+    if isinstance(sender_contact_name, str) and sender_contact_name.strip():
+        return "sender is saved in contacts"
+
+    return None
+
+
 @router.post("/webhook/green-api")
 async def green_api_webhook(request: Request) -> dict[str, str]:
     """Always answer 200 so GREEN-API does not retry a notification forever."""
@@ -42,6 +66,11 @@ async def green_api_webhook(request: Request) -> dict[str, str]:
 
     logger.info("Webhook received: %s", _summary(payload))
     logger.debug("Webhook full body: %s", payload)
+
+    ignore_reason = _ignore_reason(payload)
+    if ignore_reason is not None:
+        logger.info("Webhook ignored: %s (%s)", _summary(payload), ignore_reason)
+        return {"status": "ignored", "reason": ignore_reason}
 
     try:
         await bot.handle_webhook(payload)
