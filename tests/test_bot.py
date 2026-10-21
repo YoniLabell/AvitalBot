@@ -61,6 +61,12 @@ def sent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Outbox:
     monkeypatch.setattr(green_api, "send_text", fake_send_text)
     monkeypatch.setattr(green_api, "send_buttons", fake_send_buttons)
     monkeypatch.setattr(green_api, "send_file", fake_send_file)
+
+    async def fake_get_contact_info(chat_id: str) -> dict[str, str]:
+        # Unsaved prospect. Tests never contact the real GREEN-API instance.
+        return {"contactName": "", "name": "Public WhatsApp name"}
+
+    monkeypatch.setattr(green_api, "get_contact_info", fake_get_contact_info)
     return outbox
 
 
@@ -129,6 +135,86 @@ def post(client: TestClient, payload: dict):
     response = client.post("/webhook/green-api", json=payload)
     assert response.status_code == 200
     return response
+
+
+# --- Unsaved contacts only --------------------------------------------------
+
+
+def test_saved_contact_in_webhook_is_ignored(
+    client: TestClient, sent: Outbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = incoming("Hi")
+    payload["senderData"]["senderContactName"] = "Existing client"
+
+    async def must_not_lookup(chat_id: str):
+        raise AssertionError("Saved contact must be blocked before calling API")
+
+    monkeypatch.setattr(green_api, "get_contact_info", must_not_lookup)
+    response = post(client, payload)
+    assert response.json()["status"] == "ignored"
+    assert sent == []
+    assert json_store.get_user(CHAT_ID) is None
+
+
+def test_saved_contact_found_by_get_contact_info_is_ignored(
+    client: TestClient, sent: Outbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Webhook may omit senderContactName. Check the actual phone book.
+    async def fake_contact_info(chat_id: str):
+        assert chat_id == CHAT_ID
+        return {"name": "Profile name", "contactName": "Existing client"}
+
+    monkeypatch.setattr(green_api, "get_contact_info", fake_contact_info)
+    response = post(client, incoming("Hello"))
+    assert response.json()["status"] == "ignored"
+    assert sent == []
+    assert json_store.get_user(CHAT_ID) is None
+
+
+def test_unsaved_contact_is_allowed_despite_public_profile_name(
+    client: TestClient, sent: Outbox
+) -> None:
+    # WhatsApp profile names do not indicate that a number is saved.
+    response = post(client, incoming("Hello"))
+    assert response.json()["status"] == "ok"
+    assert sent.menus() == [he.LANGUAGE_BUTTONS]
+
+
+def test_contact_lookup_failure_blocks_all_replies(
+    client: TestClient, sent: Outbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def failing_contact_info(chat_id: str):
+        raise green_api.GreenAPIError("Instance temporarily unavailable")
+
+    monkeypatch.setattr(green_api, "get_contact_info", failing_contact_info)
+    response = post(client, incoming("Hello"))
+    assert response.json()["status"] == "ignored"
+    assert sent == []
+    assert json_store.get_user(CHAT_ID) is None
+
+
+def test_missing_phonebook_field_blocks_all_replies(
+    client: TestClient, sent: Outbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def incomplete_contact_info(chat_id: str):
+        return {"name": "WhatsApp public profile only"}
+
+    monkeypatch.setattr(green_api, "get_contact_info", incomplete_contact_info)
+    response = post(client, incoming("Hello"))
+    assert response.json()["status"] == "ignored"
+    assert sent == []
+
+
+def test_group_messages_never_trigger_contact_lookup_or_replies(
+    client: TestClient, sent: Outbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def must_not_lookup(chat_id: str):
+        raise AssertionError("Group messages should be ignored immediately")
+
+    monkeypatch.setattr(green_api, "get_contact_info", must_not_lookup)
+    response = post(client, incoming("Hello", chat_id="120363012345678@g.us"))
+    assert response.json()["status"] == "ignored"
+    assert sent == []
 
 
 def test_health_is_cheap_and_ok(client: TestClient, sent: Outbox) -> None:
