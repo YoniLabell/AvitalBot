@@ -3,23 +3,15 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Request
 
-from app.services import bot
+from app.services import bot, green_api
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["webhook"])
-
-# TEMPORARY QUEUE DRAIN MODE: acknowledge every webhook with an empty HTTP 200
-# without running the bot or sending any WhatsApp message. Enabled by default
-# for the current backlog. Set DRAIN_QUEUE_MODE=false in Render to resume.
-DRAIN_QUEUE_MODE = os.getenv("DRAIN_QUEUE_MODE", "true").strip().lower() in {
-    "1", "true", "yes", "on"
-}
 
 
 def _summary(payload: dict[str, Any]) -> str:
@@ -34,37 +26,46 @@ def _summary(payload: dict[str, Any]) -> str:
     )
 
 
-def _ignore_reason(payload: dict[str, Any]) -> str | None:
-    """Return why an incoming chat should not reach the bot, if any.
+async def _ignore_reason(payload: dict[str, Any]) -> str | None:
+    """Allow only incoming messages from numbers not saved in the phone book.
 
-    AvitalBot is meant only for new leads. GREEN-API exposes
-    senderContactName from the current WhatsApp account's contacts, so
-    existing saved contacts are left to the studio owner. Group chats are
-    ignored as well.
+    senderContactName is the *saved phone-book name*, not the WhatsApp profile
+    name. Cross-check unknown/unsaved senders with GetContactInfo so a missing
+    webhook field cannot accidentally cause a reply to a saved contact.
+    If verification fails, fail closed: never risk messaging an existing client.
     """
     if payload.get("typeWebhook") != bot.INCOMING_MESSAGE:
         return None
 
     sender = payload.get("senderData") or {}
     chat_id = sender.get("chatId")
+    if not isinstance(chat_id, str) or not chat_id.endswith(("@c.us", "@lid")):
+        return "not a one-to-one WhatsApp chat"
 
-    if isinstance(chat_id, str) and chat_id.endswith("@g.us"):
-        return "WhatsApp group"
+    saved_name = sender.get("senderContactName")
+    if isinstance(saved_name, str) and saved_name.strip():
+        return "sender is saved in phone contacts (webhook)"
 
-    sender_contact_name = sender.get("senderContactName")
-    if isinstance(sender_contact_name, str) and sender_contact_name.strip():
-        return "sender is saved in contacts"
+    try:
+        info = await green_api.get_contact_info(chat_id)
+    except green_api.GreenAPIError as exc:
+        logger.warning("Cannot check whether %s is saved; ignoring to avoid messaging contacts: %s", chat_id, exc)
+        return "unable to verify contact is unsaved"
+
+    # GREEN-API GetContactInfo: contactName = phone book entry, while name
+    # is only the user's WhatsApp profile name (and must NOT be used here).
+    contact_name = info.get("contactName")
+    if not isinstance(contact_name, str):
+        logger.warning("GetContactInfo for %s did not include contactName; ignoring", chat_id)
+        return "contact book status unknown"
+    if contact_name.strip():
+        return "sender is saved in phone contacts (GetContactInfo)"
 
     return None
 
-
 @router.post("/webhook/green-api")
-async def green_api_webhook(request: Request) -> dict[str, str] | Response:
+async def green_api_webhook(request: Request) -> dict[str, str]:
     """Always answer 200 so GREEN-API does not retry a notification forever."""
-    if DRAIN_QUEUE_MODE:
-        # GREEN-API removes acknowledged notifications from its incoming queue.
-        # No body, no bot processing, and no outgoing WhatsApp messages.
-        return Response(status_code=200)
     try:
         payload: Any = await request.json()
     except ValueError:
@@ -79,7 +80,7 @@ async def green_api_webhook(request: Request) -> dict[str, str] | Response:
     logger.info("Webhook received: %s", _summary(payload))
     logger.debug("Webhook full body: %s", payload)
 
-    ignore_reason = _ignore_reason(payload)
+    ignore_reason = await _ignore_reason(payload)
     if ignore_reason is not None:
         logger.info("Webhook ignored: %s (%s)", _summary(payload), ignore_reason)
         return {"status": "ignored", "reason": ignore_reason}
