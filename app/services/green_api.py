@@ -251,6 +251,11 @@ async def get_settings() -> dict[str, Any]:
     return await _request("getSettings")
 
 
+async def get_contact_info(chat_id: str) -> dict[str, Any]:
+    """Check the phone book entry for one chat; contactName is empty if unsaved."""
+    return await _request("getContactInfo", {"chatId": chat_id})
+
+
 async def send_file(chat_id: str, file_path: str | Path, caption: str | None = None) -> dict[str, Any]:
     """Upload a local file and send it. Used for the class schedule image."""
     path = Path(file_path)
