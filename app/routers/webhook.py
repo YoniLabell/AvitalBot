@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 
 from app.services import bot
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["webhook"])
+
+# TEMPORARY QUEUE DRAIN MODE: acknowledge every webhook with an empty HTTP 200
+# without running the bot or sending any WhatsApp message. Enabled by default
+# for the current backlog. Set DRAIN_QUEUE_MODE=false in Render to resume.
+DRAIN_QUEUE_MODE = os.getenv("DRAIN_QUEUE_MODE", "true").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 
 
 def _summary(payload: dict[str, Any]) -> str:
@@ -51,8 +59,12 @@ def _ignore_reason(payload: dict[str, Any]) -> str | None:
 
 
 @router.post("/webhook/green-api")
-async def green_api_webhook(request: Request) -> dict[str, str]:
+async def green_api_webhook(request: Request) -> dict[str, str] | Response:
     """Always answer 200 so GREEN-API does not retry a notification forever."""
+    if DRAIN_QUEUE_MODE:
+        # GREEN-API removes acknowledged notifications from its incoming queue.
+        # No body, no bot processing, and no outgoing WhatsApp messages.
+        return Response(status_code=200)
     try:
         payload: Any = await request.json()
     except ValueError:
